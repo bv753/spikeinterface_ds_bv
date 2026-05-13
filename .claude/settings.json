@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-Command python -ErrorAction SilentlyContinue | Select-Object Source; Get-ChildItem \"$env:APPDATA\\\\..\", \"$env:LOCALAPPDATA\" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match \"conda|mamba|miniforge\" } | Select-Object FullName)",
+      "PowerShell(Get-ChildItem \"$env:USERPROFILE\\\\AppData\\\\Local\" -Directory | Where-Object { $_.Name -match \"conda|mamba|miniforge|anaconda\" } | Select-Object FullName)",
+      "PowerShell(Get-ChildItem \"$env:USERPROFILE\\\\AppData\\\\Local\\\\Programs\" -Directory -ErrorAction SilentlyContinue | Select-Object Name | Sort-Object Name)",
+      "PowerShell(Get-ChildItem \"$env:USERPROFILE\" -Directory | Select-Object Name | Sort-Object Name)",
+      "Read(//c/Users/assad/miniconda3/envs/**)",
+      "Bash(mkdir -p \"c:/Users/assad/Documents/codevault/spikeinterface_pipeline/.vscode\")"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\assad\\Documents\\codevault\\spikeinterface_pipeline"
+    ]
+  }
+}

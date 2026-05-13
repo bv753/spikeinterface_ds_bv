@@ -4,7 +4,7 @@ import spikeinterface.full as si
 from spikeinterface.curation import remove_redundant_units
 from spikeinterface.curation import auto_merge_units
 from pathlib import Path
-from spikeinterface_gui import run_mainwindow
+#from spikeinterface_gui import run_mainwindow
 from spikeinterface.exporters import to_pynapple_tsgroup
 
 #base_folder = Path("C:\\Users\\assad\\Documents\\analysis_files\\DS13\\DS13_20250822")
@@ -81,7 +81,7 @@ def curation(base_folder):
     pynapple_folder.mkdir(exist_ok=True, parents=True)
     my_tsgroup.save(pynapple_folder / "spikes.npz")
 
-    run_mainwindow(analyzer_clean,curation=True)
+    #run_mainwindow(analyzer_clean,curation=True)
 
     analyzer_clean = si.load_sorting_analyzer(base_folder / 'analyzer_clean')
 

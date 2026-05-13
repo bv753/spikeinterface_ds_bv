@@ -40,7 +40,7 @@ def get_stimulation_times(base_folder, nidaq_map=None, overwrite=False):
         ainmap=None
         optoidx=None
 
-    bs = pni.get_binary_signals(base_folder, dinmap=dinmap, ainmap=ainmap, optoidx=optoidx, overwrite=overwrite, plot=False)
+    bs = pni.get_binary_signals(base_folder, dinmap=dinmap, ainmap=ainmap, optoidx=optoidx, overwrite=overwrite, plot=True)
 
     bs_md = bs.metadata
     # get all rows of bs_md where column 'event' contains 'chrimson_on' or 'chr2_on'

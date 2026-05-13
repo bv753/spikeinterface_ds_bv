@@ -34,7 +34,7 @@ def curate_units(analyzer_clean):
     unified_df['sd_ratio_distance'] = np.abs(np.log(unified_df['sd_ratio']))
 
     # get index of those neurons
-    positive_neurons = unified_df[(unified_df['peak_trough_ratio'] <= -1)
+    positive_neurons = unified_df[(unified_df['main_peak_to_trough_ratio'] <= -1)
                                   | (unified_df['recovery_slope'] > 0)]
 
 

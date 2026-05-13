@@ -4,6 +4,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Qt5Agg')
+import re
 #joblib
 from joblib import Parallel, delayed
 
@@ -126,6 +127,244 @@ def plot_on_events_psth(ephys_data, sigs, pynapple_folder):
                 save_folder=psth_folder,
                 minmax=(-0.5,0.5)
             ) for neuron in neurons_idx)
+
+
+def _extract_power(event_name):
+    """Extract the trailing integer from an event name like 'chrimson_on_40'."""
+    m = re.search(r"(\d+)$", str(event_name))
+    return int(m.group(1)) if m else None
+
+
+def _draw_opto_psth_on_axes(timestamps, opsin, power_trefs, power_off_events,
+                            ax_psth, ax_raster, minmax=(-0.5, 0.5)):
+    """
+    Draw a combined PSTH + raster for one unit / one opsin onto the provided axes.
+
+    Parameters
+    ----------
+    timestamps : nap.Ts
+        Spike timestamps for a single unit.
+    opsin : str
+        Opsin name (used only for the column title).
+    power_trefs : list of (power, tref)
+        Sorted by power.
+    power_off_events : list of (power, nap.Ts | None)
+        Matching off-event timestamps.
+    ax_psth : matplotlib.axes.Axes
+        Axes for the PSTH (top).
+    ax_raster : matplotlib.axes.Axes
+        Axes for the raster (bottom).
+    minmax : tuple
+        Pre/post window in seconds.
+    """
+    if len(power_trefs) == 0:
+        ax_psth.set_title(opsin)
+        ax_psth.text(0.5, 0.5, 'no events', transform=ax_psth.transAxes,
+                     ha='center', va='center', fontsize=9, color='grey')
+        return
+
+    cmap = plt.cm.viridis
+    n_powers = len(power_trefs)
+    colors = [cmap(i / max(n_powers - 1, 1)) for i in range(n_powers)]
+
+    # --- compute peri-event for each power level ---
+    all_peths = []
+    all_spike_tsds = []
+    trial_counts = []
+    off_medians = []
+
+    for (power, tref), (_, off_ts) in zip(power_trefs, power_off_events):
+        peth = nap.compute_perievent(timestamps=timestamps, tref=tref,
+                                     minmax=minmax, time_unit="s")
+        spikes_tsd = peth.to_tsd()
+        all_peths.append(peth)
+        all_spike_tsds.append(spikes_tsd)
+        n_trials = int(max(peth) - min(peth)) + 1 if len(spikes_tsd) > 0 else len(tref)
+        trial_counts.append(n_trials)
+
+        if off_ts is not None and hasattr(off_ts, 't') and len(off_ts.t) > 0:
+            off_rel = off_ts.t - tref.t
+            off_medians.append(float(np.median(off_rel)))
+        else:
+            off_medians.append(None)
+
+    total_trials = sum(trial_counts)
+    if total_trials == 0:
+        ax_psth.set_title(opsin)
+        return
+
+    # ---- PSTH ----
+    bin_size = 0.005
+    all_rates = []
+    for i, (power, _) in enumerate(power_trefs):
+        rate = np.mean(all_peths[i].count(bin_size), axis=1) / bin_size
+        all_rates.append(rate)
+        ax_psth.plot(rate, linewidth=0.75, alpha=0.75, color=colors[i],
+                     label=f"{power} µW")
+    # grand average
+    if len(all_rates) > 0:
+        grand_avg = np.mean(
+            np.column_stack([r.values if hasattr(r, 'values') else r for r in all_rates]),
+            axis=1)
+        ref = all_rates[0]
+        if hasattr(ref, 'index'):
+            ax_psth.plot(ref.index, grand_avg, linewidth=2, color='black', label='mean')
+        else:
+            ax_psth.plot(grand_avg, linewidth=2, color='black', label='mean')
+    ax_psth.set_ylabel("Rate (spikes/s)")
+    ax_psth.legend(fontsize=6, loc='upper right', ncol=min(n_powers + 1, 5))
+    ax_psth.set_title(opsin)
+
+    # ---- Raster ----
+    trial_offset = 0
+    for i, (power, _) in enumerate(power_trefs):
+        spikes_tsd = all_spike_tsds[i]
+        if len(spikes_tsd) == 0:
+            trial_offset += trial_counts[i]
+            continue
+        spike_times = spikes_tsd.index
+        trial_ids = spikes_tsd.values + trial_offset - min(all_peths[i])
+        ms = max(-total_trials / 1000 * 1 + 3, 0.5)
+        ax_raster.plot(spike_times, trial_ids, "|",
+                       markersize=ms, color=colors[i], mew=0.8)
+        trial_offset += trial_counts[i]
+
+    cum = 0
+    for i in range(n_powers - 1):
+        cum += trial_counts[i]
+        ax_raster.axhline(cum, color='grey', linewidth=0.5, linestyle='-')
+
+    ax_raster.set_ylabel("Trial #")
+    ax_raster.set_xlabel("Time from stimulus onset (s)")
+
+    # vertical lines
+    for ax in (ax_psth, ax_raster):
+        ax.set_xlim(minmax)
+        ax.axvline(0.0, color='black', linewidth=0.8)
+        for i, off_med in enumerate(off_medians):
+            if off_med is not None:
+                ax.axvline(off_med, color=colors[i], linestyle='--',
+                           linewidth=0.6, alpha=0.7)
+
+
+def plot_opto_psth_single_unit(timestamps, opsin_data, unitID,
+                               save_folder=None, minmax=(-0.5, 0.5)):
+    """
+    Plot chrimson and chr2 PSTH + raster side-by-side for one unit.
+
+    Parameters
+    ----------
+    timestamps : nap.Ts
+        Spike timestamps for the unit.
+    opsin_data : dict
+        ``{opsin_name: (power_trefs, power_off_events)}`` for each opsin.
+        *power_trefs* is a list of ``(power_int, tref)`` sorted by power;
+        *power_off_events* is a matching list of ``(power_int, off_ts | None)``.
+    unitID : int or str
+        Unit identifier.
+    save_folder : Path or None
+    minmax : tuple
+    """
+    opsins = list(opsin_data.keys())
+    n_opsins = len(opsins)
+    if n_opsins == 0:
+        return
+
+    fig, axs = plt.subplots(2, n_opsins, figsize=(8 * n_opsins, 7),
+                            sharex=True,
+                            sharey='row',
+                            gridspec_kw={'height_ratios': [1, 2.5]})
+    # ensure axs is always 2-D even when n_opsins == 1
+    if n_opsins == 1:
+        axs = axs[:, np.newaxis]
+
+    for col, opsin in enumerate(opsins):
+        power_trefs, power_off_events = opsin_data[opsin]
+        _draw_opto_psth_on_axes(timestamps, opsin, power_trefs, power_off_events,
+                                ax_psth=axs[0, col], ax_raster=axs[1, col],
+                                minmax=minmax)
+
+    fig.suptitle(f"Unit {unitID}  –  opto PSTH (all powers)", fontsize=12)
+    fig.tight_layout()
+
+    if save_folder is not None:
+        fig.savefig(save_folder / f"Unit_{unitID}_opto_all_powers_psth.png", dpi=150)
+        plt.close(fig)
+    else:
+        plt.show()
+
+
+def _collect_opsin_events(bs_metadata, bs, opsin):
+    """Return (power_trefs, power_off_events) for *opsin*, or None if no events."""
+    on_mask = bs_metadata['event'].str.contains(f'{opsin}_on', na=False)
+    on_events_df = bs_metadata[on_mask].copy()
+    if on_events_df.empty:
+        return None
+    on_events_df['power'] = on_events_df['event'].apply(_extract_power)
+    on_events_df = on_events_df.dropna(subset=['power'])
+    on_events_df = on_events_df.sort_values('power')
+
+    off_mask = bs_metadata['event'].str.contains(f'{opsin}_off', na=False)
+    off_events_df = bs_metadata[off_mask].copy()
+    off_events_df['power'] = off_events_df['event'].apply(_extract_power)
+
+    power_trefs = []
+    power_off_events = []
+    for _, row in on_events_df.iterrows():
+        power = int(row['power'])
+        tref = bs[row.name]
+        power_trefs.append((power, tref))
+
+        off_row = off_events_df[off_events_df['power'] == power]
+        off_ts = bs[off_row.index[0]] if not off_row.empty else None
+        power_off_events.append((power, off_ts))
+
+    return power_trefs, power_off_events
+
+
+def plot_all_opto_psth(ephys_data, bs, pynapple_folder, minmax=(-0.5, 0.5)):
+    """
+    For each unit, plot chrimson and chr2 PSTH + raster side-by-side in one
+    figure, with raster rows ordered by ascending power.
+
+    Parameters
+    ----------
+    ephys_data : nap.TsGroup-like
+        Spike data keyed by unit id.
+    bs : nap.TsGroup-like
+        Binary-signals object with ``.metadata`` DataFrame containing an
+        ``'event'`` column (e.g. ``'chrimson_on_40'``, ``'chr2_off_20'``).
+    pynapple_folder : Path
+        Base folder; figures are saved under ``opto_psth_plots/``.
+    minmax : tuple
+        Pre/post window in seconds (default ±0.5 s).
+    """
+    save_folder = pynapple_folder / "opto_psth_plots"
+    save_folder.mkdir(exist_ok=True)
+
+    bs_metadata = bs.metadata
+    neurons_idx = ephys_data.keys()
+
+    # collect event data for each opsin once (shared across all units)
+    opsin_data = {}
+    for opsin in ('chrimson', 'chr2'):
+        result = _collect_opsin_events(bs_metadata, bs, opsin)
+        if result is not None:
+            opsin_data[opsin] = result
+
+    if len(opsin_data) == 0:
+        print("No chrimson or chr2 events found in bs.metadata; skipping opto PSTH.")
+        return
+
+    Parallel(n_jobs=-1, verbose=5)(
+        delayed(plot_opto_psth_single_unit)(
+            timestamps=ephys_data[neuron],
+            opsin_data=opsin_data,
+            unitID=neuron,
+            save_folder=save_folder,
+            minmax=minmax
+        ) for neuron in neurons_idx
+    )
 
 
 def test(base_folder=None):

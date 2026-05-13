@@ -6,9 +6,7 @@ import matplotlib
 matplotlib.use('Qt5Agg')
 from joblib import Parallel, delayed
 from tqdm import tqdm
-from scipy import stats
 import numpy as np
-import parse_nidq as pni
 
 def plot_corellograms(ephys_data, bs, opto_events_idx, opto_tagging_folder):
     power_levels = opto_events_idx['power'].unique().tolist()
@@ -530,3 +528,379 @@ def test():
 #chr2_events_idx = opto_events_idx[opto_events_idx['event'].str.contains('chr2_on')]
 #chrimson_events_idx = opto_events_idx[opto_events_idx['event'].str.contains('chrimson_on')]
 #chrimson_events_idx = chrimson_events_idx.index.tolist()
+
+
+def test_stim_firing(ephys_data, bs, opsins=None, post_window_ms=(1.0, 31.0),
+                     baseline_duration_s=1, baseline_gap_ms=1.0,
+                     baseline_bin_ms=10.0, alpha=0.05, save_folder=None):
+    """
+    For each unit and each opsin, test whether post-stimulus firing
+    (1–31 ms after each opto-on event) is significantly elevated compared
+    to a pre-stimulus baseline using the Mann–Whitney U test, and plot a
+    bar graph of baseline vs evoked firing rate for every unit.
+
+    Baseline: for a given opsin, collect **all** on-event times across every
+    power level.  For each on-event, take the window from −*baseline_duration_s*
+    to −*baseline_gap_ms* ms before onset, divide into non-overlapping
+    *baseline_bin_ms*-ms bins, and count spikes in each.  This shared baseline
+    distribution is used for all power-level comparisons of that opsin.
+
+    Post-stimulus: the spike count in the [post_window_ms[0], post_window_ms[1]]
+    ms window after each opto-on event (one count per trial per power).
+
+    All counts are converted to firing rates (Hz) by dividing by bin width.
+
+    Parameters
+    ----------
+    ephys_data : nap.TsGroup-like
+        Spike trains keyed by unit id.
+    bs : object
+        Binary-signals object with ``.metadata`` and ``bs[idx]`` access.
+    opsins : list of str or None
+        Opsin prefixes to test (default ``['chrimson', 'chr2']``).
+    post_window_ms : tuple of float
+        (start, end) of the post-stimulus counting window in ms (default 1–31).
+    baseline_duration_s : float
+        Seconds before stimulus onset used for baseline (default 5).
+    baseline_gap_ms : float
+        Dead-zone between baseline end and stimulus onset in ms (default 1).
+    baseline_bin_ms : float
+        Width of each baseline bin in ms (default 30, matching post window).
+    alpha : float
+        Significance threshold (default 0.05).
+    save_folder : Path or None
+        If provided, a bar-graph PNG is saved per unit into
+        ``save_folder / stim_firing_plots``.
+
+    Returns
+    -------
+    results_df : pandas.DataFrame
+        One row per unit × opsin × power with columns:
+        ``['unit', 'opsin', 'power', 'n_trials', 'rate_post_hz',
+          'rate_baseline_hz', 'U_stat', 'p_value', 'significant']``
+    """
+    import re
+    import pandas as pd
+    from scipy.stats import mannwhitneyu
+    from pathlib import Path
+
+    if opsins is None:
+        opsins = ['chrimson', 'chr2']
+
+    bs_metadata = bs.metadata
+    post_start_s = post_window_ms[0] / 1000.0
+    post_end_s = post_window_ms[1] / 1000.0
+    post_bin_s = post_end_s - post_start_s
+    baseline_bin_s = baseline_bin_ms / 1000.0
+    baseline_gap_s = baseline_gap_ms / 1000.0
+
+    def _extr_power(s):
+        m = re.search(r"(\d+)$", str(s))
+        return int(m.group(1)) if m else None
+
+    # ---- set up save folder ----
+    if save_folder is not None:
+        plot_folder = Path(save_folder) / "stim_firing_plots"
+        plot_folder.mkdir(parents=True, exist_ok=True)
+    else:
+        plot_folder = None
+
+    records = []
+
+    # Pre-collect per-opsin data so the baseline and post-stim use ALL onset times (all powers pooled)
+    opsin_info = {}  # opsin -> {all_onsets}
+    for opsin in opsins:
+        on_mask = bs_metadata['event'].str.contains(f'{opsin}_on', na=False)
+        on_events_df = bs_metadata[on_mask].copy()
+        if on_events_df.empty:
+            continue
+        on_events_df['power'] = on_events_df['event'].apply(_extr_power)
+        on_events_df = on_events_df.dropna(subset=['power'])
+
+        # Pool all onset times across all powers
+        all_onsets = []
+        for idx in on_events_df.index:
+            ts_obj = bs[idx]
+            if hasattr(ts_obj, 't'):
+                all_onsets.extend(ts_obj.t.tolist())
+            elif hasattr(ts_obj, 'index'):
+                all_onsets.extend(ts_obj.index.tolist())
+        all_onsets = np.array(sorted(all_onsets))
+        if len(all_onsets) == 0:
+            continue
+        opsin_info[opsin] = {'all_onsets': all_onsets}
+
+    # ---- main loop: per unit ----
+    units = list(ephys_data.keys())
+    for unit in units:
+        spike_times = np.asarray(ephys_data[unit].index)
+
+        for opsin, info in opsin_info.items():
+            all_onsets = info['all_onsets']
+
+            # --- shared baseline: 30 ms bins in [-5s, -1ms] before ANY onset ---
+            n_bins_per_trial = int(baseline_duration_s / baseline_bin_s)
+            baseline_counts = []
+            for onset in all_onsets:
+                bl_end = onset - baseline_gap_s
+                bl_start = bl_end - baseline_duration_s
+                for b in range(n_bins_per_trial):
+                    bin_lo = bl_start + b * baseline_bin_s
+                    bin_hi = bin_lo + baseline_bin_s
+                    cnt = int(np.sum(
+                        (spike_times >= bin_lo) & (spike_times < bin_hi)
+                    ))
+                    baseline_counts.append(cnt)
+            baseline_counts = np.array(baseline_counts)
+            baseline_rates = baseline_counts / baseline_bin_s  # Hz
+
+            # --- post-stimulus counts (one per trial, all powers pooled) ---
+            post_counts = np.empty(len(all_onsets), dtype=int)
+            for i, onset in enumerate(all_onsets):
+                win_start = onset + post_start_s
+                win_end = onset + post_end_s
+                post_counts[i] = int(np.sum(
+                    (spike_times >= win_start) & (spike_times < win_end)
+                ))
+            post_rates = post_counts / post_bin_s  # Hz
+
+            # --- Mann-Whitney U (one-sided: post > baseline) ---
+            if len(post_rates) > 0 and len(baseline_rates) > 0:
+                try:
+                    u_stat, p_val = mannwhitneyu(
+                        post_rates, baseline_rates,
+                        alternative='greater'
+                    )
+                except ValueError:
+                    u_stat, p_val = np.nan, 1.0
+            else:
+                u_stat, p_val = np.nan, 1.0
+
+            records.append({
+                'unit': unit,
+                'opsin': opsin,
+                'power': 'all',
+                'n_trials': len(all_onsets),
+                'rate_post_hz': float(np.mean(post_rates)),
+                'rate_baseline_hz': float(np.mean(baseline_rates)),
+                'U_stat': u_stat,
+                'p_value': p_val,
+                'significant': p_val < alpha,
+            })
+
+    results_df = pd.DataFrame(records)
+
+    # ---- bar-graph per unit ----
+    if len(results_df) > 0:
+        _plot_stim_firing_bars(results_df, plot_folder, alpha)
+
+    return results_df
+
+
+def _plot_stim_firing_bars(results_df, plot_folder, alpha=0.05):
+    """
+    For each unit, draw a grouped bar chart: baseline rate vs post-stim rate
+    for every opsin × power combination.
+
+    Parameters
+    ----------
+    results_df : pd.DataFrame
+        Output of ``test_stim_firing``.
+    plot_folder : Path or None
+        Where to save PNGs.  If None, ``plt.show()`` is used.
+    alpha : float
+        Significance level for annotating bars with an asterisk.
+    """
+    import matplotlib.pyplot as plt
+
+    units = results_df['unit'].unique()
+    for unit in units:
+        udf = results_df[results_df['unit'] == unit].copy()
+        udf = udf.sort_values(['opsin', 'power'])
+
+        labels = [f"{row['opsin']}\n{row['power']} µW" for _, row in udf.iterrows()]
+        baseline_vals = udf['rate_baseline_hz'].values
+        post_vals = udf['rate_post_hz'].values
+        sig_flags = udf['significant'].values
+
+        x = np.arange(len(labels))
+        width = 0.35
+
+        fig, ax = plt.subplots(figsize=(max(6, len(labels) * 1.4), 5))
+        bars_bl = ax.bar(x - width / 2, baseline_vals, width, label='Baseline', color='grey', alpha=0.7)
+        bars_po = ax.bar(x + width / 2, post_vals, width, label='Post-stim (1–31 ms)', color='steelblue')
+
+        # annotate significant comparisons
+        y_max = max(np.max(baseline_vals), np.max(post_vals)) if len(baseline_vals) > 0 else 1
+        for i, sig in enumerate(sig_flags):
+            if sig:
+                bar_top = max(baseline_vals[i], post_vals[i])
+                ax.text(x[i], bar_top + y_max * 0.02, '*', ha='center', va='bottom',
+                        fontsize=14, fontweight='bold', color='red')
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=8)
+        ax.set_ylabel('Firing rate (Hz)')
+        ax.set_title(f'Unit {unit} – Baseline vs Evoked Firing Rate')
+        ax.legend()
+        fig.tight_layout()
+
+        if plot_folder is not None:
+            fig.savefig(plot_folder / f'Unit_{unit}_stim_firing_bar.png', dpi=150)
+            plt.close(fig)
+        else:
+            plt.show()
+
+def plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=None, max_latency_ms=100):
+    """
+    Plot the distribution of time to first spike (TTFS) relative to optogenetic stimulus onset
+    for each neuron and opsin. The TTFS is calculated as the latency between the stimulus
+    onset and the first spike after the onset.
+
+    Parameters
+    ----------
+    ephys_data : nap.TsGroup-like
+        Spike trains keyed by unit id.
+    bs : object
+        Binary-signals object with ``.metadata`` and ``bs[idx]`` access.
+    save_folder : Path or None
+        If provided, a summary PNG is saved to ``save_folder / ttfs_summary.png``.
+    max_latency_ms : float
+        Maximum latency for considering a spike (default 100 ms).
+
+    Returns
+    -------
+    df : pandas.DataFrame
+        DataFrame containing TTFS data with columns:
+        ``['unit', 'opsin', 'power', 'onset_s', 'ttfs_ms', 'responded']``
+    ttfs_folder : Path
+        Path to the folder containing saved unit figures.
+    """
+    import re
+    import pandas as pd
+    from pathlib import Path
+
+    if save_folder is None:
+        save_folder = Path.cwd()
+    else:
+        save_folder = Path(save_folder)
+    ttfs_folder = save_folder / 'opto_tagging' / 'ttfs'
+    ttfs_folder.mkdir(parents=True, exist_ok=True)
+
+    bs_metadata = bs.metadata
+
+    records = []
+    # for each opsin, find all on events and extract spike times in the post-stimulus window
+    for opsin in ['chrimson', 'chr2']:
+        # find rows corresponding to opsin on events
+        mask = bs_metadata['event'].str.contains(f'{opsin}_on', na=False)
+        events_idx = bs_metadata[mask]
+        if events_idx.shape[0] == 0:
+            continue
+
+        # extract power from the event string (expects integer at the end e.g. 'chr2_on_20')
+        def _extract_power(s):
+            m = re.search(r"(\d+)$", str(s))
+            return int(m.group(1)) if m else np.nan
+
+        events_idx = events_idx.copy()
+        events_idx['power'] = events_idx['event'].apply(_extract_power)
+
+        for idx, row in events_idx.iterrows():
+            ts_obj = bs[idx]
+            onsets = ts_obj.t if hasattr(ts_obj, 't') else ts_obj.index
+            power = row['power']
+            for onset in onsets:
+                for unit in ephys_data.keys():
+                    spike_times = ephys_data[unit].index
+                    # relative spike times (s)
+                    rel = spike_times - onset
+                    max_lat_s = float(max_latency_ms) / 1000.0
+                    mask_spikes = (rel > 0) & (rel <= max_lat_s)
+                    if np.any(mask_spikes):
+                        latency_s = np.min(rel[mask_spikes])
+                        ttfs_ms = float(latency_s * 1000.0)
+                        responded = True
+                    else:
+                        ttfs_ms = float(max_latency_ms)
+                        responded = False
+                        
+                    # Calculate null TTFS from the 100ms preceding the event onset
+                    rel_null = spike_times - (onset - 0.1)
+                    mask_null = (rel_null > 0) & (rel_null <= 0.1)
+                    if np.any(mask_null):
+                        null_latency_s = np.min(rel_null[mask_null])
+                        null_ttfs_ms = float(null_latency_s * 1000.0)
+                    else:
+                        null_ttfs_ms = 100.0
+
+                    records.append({
+                        'unit': unit,
+                        'opsin': opsin,
+                        'power': power,
+                        'onset_s': float(onset),
+                        'ttfs_ms': ttfs_ms,
+                        'null_ttfs_ms': null_ttfs_ms,
+                        'responded': responded
+                    })
+
+    df = pd.DataFrame(records)
+
+    # prepare to plot per-unit TTFS histograms
+    opsins = ['chrimson', 'chr2']
+    units = sorted(df['unit'].dropna().unique())
+    all_powers = sorted(df['power'].dropna().unique())
+    n_opsins = len(opsins)
+    n_powers = max(len(all_powers), 1)
+
+    for unit in units:
+        fig, axs = plt.subplots(nrows=n_powers, ncols=n_opsins, figsize=(5 * n_opsins, 3 * n_powers), sharex=True, sharey=True)
+        # Ensure axs is a 2D array
+        if n_powers == 1 and n_opsins == 1:
+            axs = np.array([[axs]])
+        elif n_powers == 1:
+            axs = axs[np.newaxis, :]
+        elif n_opsins == 1:
+            axs = axs[:, np.newaxis]
+
+        unit_df = df[df['unit'] == unit]
+        
+        # Null distribution: pooled first spike times in the 100ms prior across all opsins/powers
+        null_latencies = unit_df['null_ttfs_ms'].dropna().values
+            
+        bins = np.arange(0, max_latency_ms + 5, 5)
+
+        for col, op in enumerate(opsins):
+            op_df = unit_df[unit_df['opsin'] == op]
+            
+            for row, power in enumerate(all_powers):
+                ax = axs[row, col]
+                power_df = op_df[op_df['power'] == power]
+                latencies = power_df['ttfs_ms'].dropna().values
+                
+                pow_label = f"{int(power) if power == int(power) else power}"
+                
+                if len(null_latencies) > 0:
+                    ax.hist(null_latencies, bins=bins, alpha=0.8, color='gray', label='Null Dist', density=True, cumulative=True, histtype='step', linewidth=2)
+                
+                if len(latencies) > 0:
+                    ax.hist(latencies, bins=bins, alpha=0.8, color='C0', label=f'{op}', density=True, cumulative=True, histtype='step', linewidth=2)
+                    ax.set_title(f'{op} @ {pow_label} \u00b5W')
+                else:
+                    ax.set_title(f'{op} @ {pow_label} \u00b5W (No Data)')
+                
+                if row == n_powers - 1:
+                    ax.set_xlabel('Time to first spike (ms)')
+                if col == 0:
+                    ax.set_ylabel('Cumulative Probability')
+                
+                if len(null_latencies) > 0 or len(latencies) > 0:
+                    ax.legend(fontsize=8)
+                
+        fig.suptitle(f'Unit {unit} - Time to First Spike Distribution')
+        plt.tight_layout()
+        figpath = ttfs_folder / f'Unit_{unit}_ttfs.png'
+        plt.savefig(figpath)
+        plt.close(fig)
+
+    return df, ttfs_folder

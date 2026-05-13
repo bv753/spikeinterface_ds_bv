@@ -156,6 +156,11 @@ def parse_tones(tone_onsets, tone_offsets, solenoid_onsets, time_support, verbos
     if len(valid_tone_onsets) != len(valid_tone_offsets):
         raise ValueError("Number of valid tone onsets does not match number of valid tone offsets")
     valid_tone_durations = valid_tone_offsets - valid_tone_onsets
+    #make sure tone duration are at least 0.05s. anything less should be discarded
+    valid_dur_idxs = valid_tone_durations > 0.05
+    valid_tone_durations = valid_tone_durations[valid_dur_idxs]
+    valid_tone_onsets = valid_tone_onsets[valid_dur_idxs]
+    valid_tone_offsets = valid_tone_offsets[valid_dur_idxs]
 
 
     #get the duration of each tone
@@ -277,6 +282,17 @@ def get_digital_ts(digital_events, map2imectime, time_support, din=None, event_n
     offtimes = times[n_times//2:]
     ontimes = times[:n_times//2]
 
+    #check that the first ontime is less than the first offtime
+    if ontimes[0] > offtimes[0]:
+        #remove the first index from offtimes
+        offtimes = offtimes[1:]
+    #check that the last ontime is less than the last offtime
+    if ontimes[-1] > offtimes[-1]:
+        ontimes = ontimes[:-1]
+
+    if (ontimes[0] > offtimes[0] or ontimes[-1] > offtimes[-1]):
+        raise ValueError("Onset times and offset times are not properly ordered. Check the digital event times and mapping.")
+
     on_ts = nap.Ts(t=ontimes, time_support=time_support)
     off_ts = nap.Ts(t=offtimes, time_support=time_support)
     tslist = [on_ts, off_ts]
@@ -284,7 +300,7 @@ def get_digital_ts(digital_events, map2imectime, time_support, din=None, event_n
     return tslist, indexlist
 
 
-def _find_thresholds_gmm(data, n_modes=7, plot=False):
+def _find_thresholds_gmm(data, n_modes=7, plot=False, save_folder=None, plot_label=None):
     """Find thresholds using Gaussian Mixture Model."""
     # Fit Gaussian Mixture Model
     gmm = GaussianMixture(n_components=n_modes, random_state=42)
@@ -307,7 +323,7 @@ def _find_thresholds_gmm(data, n_modes=7, plot=False):
 
     if plot:
         nb = 1000
-        pl = plt.figure(figsize=(8, 4))
+        fig = plt.figure(figsize=(8, 4))
         plt.hist(data, bins=nb, density=True, alpha=0.3, label='Data Histogram (log scale)')
         #xaxis = np.linspace(np.min(data), np.max(data), nb)
         #plt.plot(xaxis, vals)
@@ -321,6 +337,15 @@ def _find_thresholds_gmm(data, n_modes=7, plot=False):
             plt.axvline(t, color='gray', linestyle='--', alpha=0.7)
         plt.legend()
         plt.tight_layout()
+        if save_folder is None:
+            save_folder = Path.cwd() / 'gmm_threshold_plots'
+        save_folder = Path(save_folder)
+        save_folder.mkdir(parents=True, exist_ok=True)
+        label = plot_label or 'gmm_thresholds'
+        save_path = _unique_output_path(save_folder / f'{label}_n{n_modes}.png')
+        fig.savefig(save_path, dpi=200, bbox_inches='tight')
+        print(f"Saved GMM threshold plot to {save_path}")
+        plt.close(fig)
 
     return sorted(thresholds)
 
@@ -407,14 +432,14 @@ def find_mode_thresholds(data, n_modes=7, nbin=100, plot=False):
     return sorted(thresholds)
 
 #get on and off edges for each level
-def get_opto_edges(trace, time_array, powers, plot=False):
+def get_opto_edges(trace, time_array, powers, plot=False, save_folder=None, plot_label=None):
     n_powers = len(powers)
     max_power = max(powers)
     lower_cutoff = 500#np.mean(trace) * 2
     #scaling_factor = (max_trace - mean_trace) ** 0.66
     #lower_cutoff = (scaling_factor * (min_power**0.25))/2 + np.mean(trace)
     filtered_trace = trace[trace >= lower_cutoff]
-    thresholds = _find_thresholds_gmm(np.log(filtered_trace), n_modes=n_powers, plot=plot)
+    thresholds = _find_thresholds_gmm(np.log(filtered_trace), n_modes=n_powers, plot=plot, save_folder=save_folder, plot_label=plot_label)
     thresholds = np.exp(thresholds)
     thresholds = np.concatenate((np.array([lower_cutoff]), thresholds))
 
@@ -455,7 +480,7 @@ def get_opto_edges(trace, time_array, powers, plot=False):
     return onset_times, offset_times, opto_trace
 
 
-def get_opto_ts(analog_events, nidq_t_aligned, idx=None, pwrs=None, plot=False):
+def get_opto_ts(analog_events, nidq_t_aligned, idx=None, pwrs=None, plot=False, save_folder=None):
     if idx is None:
         print("Warning: idx not specified, using default channels for chrimson and chr2.")
         idx = {'chrimson': 6, 'chr2': 7}
@@ -473,7 +498,7 @@ def get_opto_ts(analog_events, nidq_t_aligned, idx=None, pwrs=None, plot=False):
         ch = idx[i]
         pw = pwrs[i]
         trace = analog_events[:,ch]
-        on_times, off_times, opto_trace = get_opto_edges(trace, nidq_t_aligned, pw, plot=plot)
+        on_times, off_times, opto_trace = get_opto_edges(trace, nidq_t_aligned, pw, plot=plot, save_folder=save_folder, plot_label=i)
         ts_list.append(nap.Tsd(t=nidq_t_aligned, d=opto_trace, time_support=time_support))
         ts_idx.append(f"{i}_trace")
         for pidx, level in enumerate(pw):
@@ -517,17 +542,28 @@ def parse_trials(start_tone_ts, outcome_tone_ts, lick_ts, require_first_licks=Tr
     #ensure that the lengths of trial_starts and trial_ends are the same
     assert len(trial_starts) == len(trial_ends)
 
+    # if any first licks are nan, raise an error
+    if require_first_licks:
+        if any(np.isnan(first_licks)):
+            #raise ValueError("Some trials are missing first licks: {}".format(first_licks))
+            print("warning: some trials are missing first licks: {}".format(first_licks))
+            #get the index of the nan
+            nanidx = np.argwhere(np.isnan(first_licks))
+            #remove the slice of first licks where nanidx
+            first_licks = np.delete(first_licks, nanidx)
+            #remove slice of trial_starts where nanidx
+            trial_starts = np.delete(trial_starts, nanidx)
+            trial_ends = np.delete(trial_ends, nanidx)
+            cues = np.delete(cues, nanidx)
+
+        first_licks_ts = nap.Ts(np.array(first_licks), time_support=time_support)
+    else:
+        first_licks_ts = None
+
     trial_starts = nap.Ts(np.array(trial_starts), time_support=time_support)
     trial_ends = nap.Ts(np.array(trial_ends), time_support=time_support)
     cues_ts = nap.Ts(np.array(cues), time_support=time_support)
 
-    # if any first licks are nan, raise an error
-    if require_first_licks:
-        if any(np.isnan(first_licks)):
-            raise ValueError("Some trials are missing first licks: {}".format(first_licks))
-        first_licks_ts = nap.Ts(np.array(first_licks), time_support=time_support)
-    else:
-        first_licks_ts = None
     return trial_starts,trial_ends, cues_ts, first_licks_ts
 
 def parse_lick_bouts(lick_ts, ili_thresh=0.5):
@@ -595,7 +631,7 @@ def parse_base_folder(base_folder, test_mode=False):
 def get_spikeglx_folder(base_folder):
     #spikeglx folder is where the _g# folder lives
     #infer the spikeglx folder by looking for a folder that ends with the same pattern as the base folder, plust "_g#"
-    subfolders = [f for f in base_folder.iterdir() if f.is_dir() and f.name.startswith(base_folder.name) and '_g' in f.name]
+    subfolders = [f for f in base_folder.iterdir() if f.is_dir() and '_g' in f.name]
     if len(subfolders) == 0:
         raise FileNotFoundError(f"No SpikeGLX folder found in {base_folder}")
     elif len(subfolders) > 1:
@@ -605,6 +641,29 @@ def get_spikeglx_folder(base_folder):
     else:
         spikeglx_folder = subfolders[0]
     return spikeglx_folder
+
+def get_imec_folder(base_folder):
+    #return the path to the subfolder of base_folder containing the files ending in imec[#].ap.bin and imec[#].ap.meta
+    spikeglx_folder = get_spikeglx_folder(base_folder)
+    subfolders = [f for f in spikeglx_folder.iterdir() if f.is_dir()]
+    
+    if len(subfolders) == 0:
+        raise FileNotFoundError(f"No IMEC probe folders found in {spikeglx_folder}")
+    
+    # Search for folders containing imec[#].ap.bin and imec[#].ap.meta files
+    for subfolder in subfolders:
+        bin_files = list(subfolder.glob("*.imec[0-9]*.ap.bin"))
+        meta_files = list(subfolder.glob("*.imec[0-9]*.ap.meta"))
+        if len(bin_files) > 0 and len(meta_files) > 0:
+            return subfolder
+    
+    # If not found in subfolders, check the spikeglx_folder itself
+    bin_files = list(spikeglx_folder.glob("imec[0-9]*.ap.bin"))
+    meta_files = list(spikeglx_folder.glob("imec[0-9]*.ap.meta"))
+    if len(bin_files) > 0 and len(meta_files) > 0:
+        return spikeglx_folder
+    
+    raise FileNotFoundError(f"No IMEC probe files (imec[#].ap.bin and imec[#].ap.meta) found in {spikeglx_folder}")
 
 def get_timing_pulse_din(dinmap):
     if 'timing_pulse' not in dinmap.keys():
@@ -682,22 +741,122 @@ def load_pynapple_file(pynapple_file):
         return None
 
 
-def get_binary_signals(base_folder=None, dinmap=None,ainmap=None, optoidx=None, overwrite=False, plot=False, test_mode=False):
+def _split_event_label(event_name):
+    import re
+    if not isinstance(event_name, str):
+        return event_name, None
+
+    # Skip continuous analog trace signals
+    if event_name.endswith('_trace'):
+        return event_name, None
+
+    # Opto-style: name_on_N or name_off_N (e.g. chrimson_on_10, chr2_off_200)
+    m = re.match(r'^(.+)_(on|off)_(\d+)$', event_name)
+    if m:
+        base = f"{m.group(1)}_{m.group(3)}"
+        return base, m.group(2)
+
+    # Standard _on / _off
+    if event_name.endswith('_on'):
+        return event_name[:-3], 'on'
+    if event_name.endswith('_off'):
+        return event_name[:-4], 'off'
+
+    # _starts / _ends  (e.g. ITI_starts, lick_bout_ends)
+    if event_name.endswith('_starts'):
+        return event_name[:-7], 'on'
+    if event_name.endswith('_ends'):
+        return event_name[:-5], 'off'
+
+    # Everything else is a single-edge timestamp (e.g. rewarded_first_licks, rewarded_cues)
+    return event_name, 'single'
+
+
+def export_event_table(tsg, csv_file):
+    metadata = getattr(tsg, 'metadata', None)
+
+    # Collect times grouped by base_event and edge type
+    events_dict = {}  # {base_event: {'on': [], 'off': [], 'single': []}}
+
+    if metadata is not None and len(metadata) > 0:
+        for key, row in metadata.iterrows():
+            event_name = row.get('event')
+            base_event, edge = _split_event_label(event_name)
+            if edge is None:
+                continue  # skip _trace and unrecognised entries
+
+            if base_event not in events_dict:
+                events_dict[base_event] = {'on': [], 'off': [], 'single': []}
+
+            times = np.asarray(tsg[key].t)
+            events_dict[base_event][edge].extend(times)
+
+    rows = []
+    for base_event in sorted(events_dict.keys()):
+        on_times     = np.sort(np.array(events_dict[base_event]['on']))
+        off_times    = np.sort(np.array(events_dict[base_event]['off']))
+        single_times = np.sort(np.array(events_dict[base_event]['single']))
+
+        # Paired on/off rows
+        max_idx = max(len(on_times), len(off_times)) if (len(on_times) or len(off_times)) else 0
+        for i in range(max_idx):
+            on_time  = on_times[i]  if i < len(on_times)  else np.nan
+            off_time = off_times[i] if i < len(off_times) else np.nan
+            duration = off_time - on_time if not (np.isnan(on_time) or np.isnan(off_time)) else np.nan
+            rows.append({'base_event': base_event, 'edge_on': on_time, 'edge_off': off_time, 'duration': duration})
+
+        # Single-edge timestamp rows (no pairable counterpart)
+        for t in single_times:
+            rows.append({'base_event': base_event, 'edge_on': t, 'edge_off': np.nan, 'duration': np.nan})
+
+    event_table = pd.DataFrame(rows, columns=['base_event', 'edge_on', 'edge_off', 'duration'])
+    if not event_table.empty:
+        event_table = event_table.sort_values('edge_on', na_position='last').reset_index(drop=True)
+
+    # Write NA string instead of nan for readability
+    event_table_out = event_table.copy().astype(str).replace('nan', 'NA')
+    event_table_out.to_csv(csv_file, index=False)
+    print(f"Saved event table to {csv_file}")
+    return event_table
+
+
+def _unique_output_path(path):
+    path = Path(path)
+    if not path.exists():
+        return path
+
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    counter = 1
+    while True:
+        candidate = parent / f"{stem}_{counter}{suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
+def get_binary_signals(base_folder=None, dinmap=None,ainmap=None, optoidx=None, overwrite=False, plot=False, test_mode=False, plot_save_folder=None):
     #section 1: folder handling
     base_folder = parse_base_folder(base_folder, test_mode=test_mode)
     spikeglx_folder = get_spikeglx_folder(base_folder)
+    imec_folder = get_imec_folder(base_folder)
     pynapple_folder, pynapple_file = get_pynapple_folder_and_file(base_folder, overwrite=overwrite)
+    event_csv_file = pynapple_folder / "binary_signals_events.csv"
+    if plot_save_folder is None:
+        plot_save_folder = pynapple_folder
 
     if not overwrite:
         bs = load_pynapple_file(pynapple_file)
         if bs is not None:
+            export_event_table(bs, event_csv_file)
             return bs
 
     #section 2: channel mapping
     dinmap, ainmap, optoidx = parse_channel_maps(base_folder, dinmap, ainmap, optoidx)
 
     #section 3: read in spikeglx data
-    imec_rec = si.read_spikeglx(spikeglx_folder, stream_name='imec0.ap', load_sync_channel=True)
+    imec_rec = si.read_spikeglx(imec_folder, stream_name='imec0.ap', load_sync_channel=True)
     nidq_rec = si.read_spikeglx(spikeglx_folder, stream_id='nidq')
 
     chids = nidq_rec.channel_ids #get all channel ids--channels are indexed using alphanumeric string identifier
@@ -746,7 +905,7 @@ def get_binary_signals(base_folder=None, dinmap=None,ainmap=None, optoidx=None, 
     ts_idx += lick_ts_idx
 
     if ('chrimson' in ainmap.keys()) or ('chr2' in ainmap.keys()):
-        opto_ts_list, opto_ts_idx = get_opto_ts(analog_events, nidq_t_aligned, idx=ainmap, pwrs=optoidx, plot=plot)
+        opto_ts_list, opto_ts_idx = get_opto_ts(analog_events, nidq_t_aligned, idx=ainmap, pwrs=optoidx, plot=plot, save_folder=plot_save_folder)
         ts_list += opto_ts_list
         ts_idx += opto_ts_idx
 
@@ -826,6 +985,7 @@ def get_binary_signals(base_folder=None, dinmap=None,ainmap=None, optoidx=None, 
     # mege first_licks_ts into tsg
     tsg = tsg.merge(first_licks_ts, reset_index=True)
     tsg.save(str(pynapple_file))
+    export_event_table(tsg, event_csv_file)
 
     return tsg
 
