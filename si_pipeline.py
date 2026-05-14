@@ -21,13 +21,13 @@ def run_pipeline(base_folder, nidaq_map=None, bad_chans=None, export_raw_summary
     # Usually, you would read in your raw recording
     spikeglx_folder = list(base_folder.glob('*_g*'))[0]
 
-    on_event_times, off_event_times = gsf.get_stimulation_times(base_folder, nidaq_map, overwrite=True)
+    on_event_times, off_event_times = gsf.get_stimulation_times(base_folder, nidaq_map, overwrite=False)
     #concatenate into one list
     artifact_times = on_event_times + off_event_times
     artifact_times.sort()
 
     stream_names, stream_ids = si.get_neo_streams('spikeglx', spikeglx_folder)
-    raw_rec = si.read_spikeglx(spikeglx_folder, stream_id='imec0.ap')
+    raw_rec = si.read_spikeglx(spikeglx_folder, stream_id='imec0.ap', load_sync_channel=False)
     raw_rec.get_probe().to_dataframe()
     sf = raw_rec.get_sampling_frequency()
     artifact_idxs = [int(t * sf) for t in artifact_times]
@@ -73,7 +73,7 @@ def run_pipeline(base_folder, nidaq_map=None, bad_chans=None, export_raw_summary
 
     preprocessed_rec = si.apply_preprocessing_pipeline(raw_rec, my_protocol['preprocessing'])
     preprocessed_rec.save(folder=base_folder / 'preprocess', format='binary', n_jobs=23, progress_bar=True, overwrite=True)
-    preprocessed_rec = si.load(r"C:\Users\assad\Documents\recording_files\DS2\DS2_050526\preprocess")
+    #preprocessed_rec = si.load(base_folder / 'preprocess')
     sorting = si.run_sorter(recording=preprocessed_rec, **my_protocol['sorting'])
 
     #sorting = si.load(base_folder / 'kilosort4_output' )

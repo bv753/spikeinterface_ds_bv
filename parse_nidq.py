@@ -817,7 +817,49 @@ def export_event_table(tsg, csv_file):
     event_table_out = event_table.copy().astype(str).replace('nan', 'NA')
     event_table_out.to_csv(csv_file, index=False)
     print(f"Saved event table to {csv_file}")
+
+    # Also write summary CSV alongside the event table
+    csv_file = Path(csv_file)
+    summary_file = csv_file.parent / (csv_file.stem + '_summary.csv')
+    export_event_summary(event_table, summary_file)
+
     return event_table
+
+
+def export_event_summary(event_table, summary_file):
+    """Write a per-base_event summary CSV: count, mean/min/max duration."""
+    if event_table.empty:
+        summary = pd.DataFrame(columns=['base_event', 'n_events', 'n_with_duration',
+                                        'mean_duration', 'min_duration', 'max_duration', 'duration_range'])
+        summary.to_csv(summary_file, index=False)
+        print(f"Saved event summary to {summary_file}")
+        return summary
+
+    rows = []
+    for base_event, group in event_table.groupby('base_event', sort=True):
+        durations = group['duration'].dropna()
+        n_events = len(group)
+        n_with_dur = len(durations)
+        mean_dur  = durations.mean()          if n_with_dur > 0 else np.nan
+        min_dur   = durations.min()           if n_with_dur > 0 else np.nan
+        max_dur   = durations.max()           if n_with_dur > 0 else np.nan
+        dur_range = max_dur - min_dur         if n_with_dur > 0 else np.nan
+        rows.append({
+            'base_event':      base_event,
+            'n_events':        n_events,
+            'n_with_duration': n_with_dur,
+            'mean_duration':   mean_dur,
+            'min_duration':    min_dur,
+            'max_duration':    max_dur,
+            'duration_range':  dur_range,
+        })
+
+    summary = pd.DataFrame(rows, columns=['base_event', 'n_events', 'n_with_duration',
+                                          'mean_duration', 'min_duration', 'max_duration',
+                                          'duration_range'])
+    summary.to_csv(summary_file, index=False)
+    print(f"Saved event summary to {summary_file}")
+    return summary
 
 
 def _unique_output_path(path):
