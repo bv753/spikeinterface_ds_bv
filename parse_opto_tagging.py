@@ -575,13 +575,34 @@ def test_stim_firing(ephys_data, bs, opsins=None, post_window_ms=(1.0, 31.0),
     Returns
     -------
     results_df : pandas.DataFrame
-        One row per unit × opsin × power with columns:
+        One row per unit × opsin with columns:
         ``['unit', 'opsin', 'power', 'n_trials', 'rate_post_hz',
           'rate_baseline_hz', 'U_stat', 'p_value', 'significant']``
+    summary_df : pandas.DataFrame
+        One row per unit.  Contains two sets of columns:
+
+        *MWU comparisons* (pooled-trial post vs baseline):
+        ``mwu_stat/pval_chrimson_vs_baseline``,
+        ``mwu_stat/pval_chr2_vs_baseline``,
+        ``mwu_stat/pval_chrimson_vs_chr2``,
+        ``mwu_stat/pval_chrimson_baseline_vs_chr2_baseline``,
+        ``tagged``.
+
+        *Spearman dose-response* (rate ~ power, including power=0 baseline):
+        ``spearman_rho_chrimson``, ``spearman_pval_chrimson`` (one-sided, H1: ρ>0),
+        ``spearman_rho_chr2``,     ``spearman_pval_chr2``,
+        ``delta_rho`` (ρ_chrimson − ρ_chr2),
+        ``fisher_z_stat``, ``fisher_z_pval`` (two-sided, tests whether the
+        two dose-response slopes are significantly different).
+
+        *Hierarchical cell-type label*:
+        ``dominant_opsin``, ``cell_type`` —
+        'iSPN' (chrimson-specific), 'dSPN' (chr2-specific),
+        'muSPN' (both significant but indistinguishable), NaN (not tagged).
     """
     import re
     import pandas as pd
-    from scipy.stats import mannwhitneyu
+    from scipy.stats import mannwhitneyu, spearmanr, norm as _norm
     from pathlib import Path
 
     if opsins is None:
@@ -606,9 +627,11 @@ def test_stim_firing(ephys_data, bs, opsins=None, post_window_ms=(1.0, 31.0),
         plot_folder = None
 
     records = []
+    # raw_rates[(unit, opsin)] = {'post', 'baseline', 'trial_powers', 'trial_baseline_means'}
+    raw_rates = {}
 
-    # Pre-collect per-opsin data so the baseline and post-stim use ALL onset times (all powers pooled)
-    opsin_info = {}  # opsin -> {all_onsets}
+    # Pre-collect per-opsin onset times AND their associated power levels
+    opsin_info = {}
     for opsin in opsins:
         on_mask = bs_metadata['event'].str.contains(f'{opsin}_on', na=False)
         on_events_df = bs_metadata[on_mask].copy()
@@ -617,18 +640,27 @@ def test_stim_firing(ephys_data, bs, opsins=None, post_window_ms=(1.0, 31.0),
         on_events_df['power'] = on_events_df['event'].apply(_extr_power)
         on_events_df = on_events_df.dropna(subset=['power'])
 
-        # Pool all onset times across all powers
         all_onsets = []
+        all_powers_per_onset = []
         for idx in on_events_df.index:
+            power = on_events_df.loc[idx, 'power']
             ts_obj = bs[idx]
             if hasattr(ts_obj, 't'):
-                all_onsets.extend(ts_obj.t.tolist())
+                onsets_for_event = ts_obj.t.tolist()
             elif hasattr(ts_obj, 'index'):
-                all_onsets.extend(ts_obj.index.tolist())
-        all_onsets = np.array(sorted(all_onsets))
+                onsets_for_event = ts_obj.index.tolist()
+            else:
+                onsets_for_event = []
+            all_onsets.extend(onsets_for_event)
+            all_powers_per_onset.extend([float(power)] * len(onsets_for_event))
+
         if len(all_onsets) == 0:
             continue
-        opsin_info[opsin] = {'all_onsets': all_onsets}
+        sort_idx = np.argsort(all_onsets)
+        opsin_info[opsin] = {
+            'all_onsets': np.array(all_onsets)[sort_idx],
+            'all_powers': np.array(all_powers_per_onset)[sort_idx],
+        }
 
     # ---- main loop: per unit ----
     units = list(ephys_data.keys())
@@ -637,8 +669,9 @@ def test_stim_firing(ephys_data, bs, opsins=None, post_window_ms=(1.0, 31.0),
 
         for opsin, info in opsin_info.items():
             all_onsets = info['all_onsets']
+            all_powers = info['all_powers']
 
-            # --- shared baseline: 30 ms bins in [-5s, -1ms] before ANY onset ---
+            # --- shared baseline: bins in [-baseline_duration_s, -baseline_gap_ms] ---
             n_bins_per_trial = int(baseline_duration_s / baseline_bin_s)
             baseline_counts = []
             for onset in all_onsets:
@@ -652,9 +685,17 @@ def test_stim_firing(ephys_data, bs, opsins=None, post_window_ms=(1.0, 31.0),
                     ))
                     baseline_counts.append(cnt)
             baseline_counts = np.array(baseline_counts)
-            baseline_rates = baseline_counts / baseline_bin_s  # Hz
+            baseline_rates = baseline_counts / baseline_bin_s  # Hz (all bins)
 
-            # --- post-stimulus counts (one per trial, all powers pooled) ---
+            # Per-trial mean baseline rate (one per onset, for Spearman at power=0)
+            trial_baseline_means = np.array([
+                int(np.sum((spike_times >= (onset - baseline_gap_s - baseline_duration_s))
+                           & (spike_times < (onset - baseline_gap_s))))
+                / baseline_duration_s
+                for onset in all_onsets
+            ], dtype=float)
+
+            # --- post-stimulus counts (one per trial) ---
             post_counts = np.empty(len(all_onsets), dtype=int)
             for i, onset in enumerate(all_onsets):
                 win_start = onset + post_start_s
@@ -664,12 +705,19 @@ def test_stim_firing(ephys_data, bs, opsins=None, post_window_ms=(1.0, 31.0),
                 ))
             post_rates = post_counts / post_bin_s  # Hz
 
+            raw_rates[(unit, opsin)] = {
+                'post':                 post_rates,
+                'baseline':             baseline_rates,
+                'trial_powers':         all_powers,
+                'trial_post_rates':     post_rates,
+                'trial_baseline_means': trial_baseline_means,
+            }
+
             # --- Mann-Whitney U (one-sided: post > baseline) ---
             if len(post_rates) > 0 and len(baseline_rates) > 0:
                 try:
                     u_stat, p_val = mannwhitneyu(
-                        post_rates, baseline_rates,
-                        alternative='greater'
+                        post_rates, baseline_rates, alternative='greater'
                     )
                 except ValueError:
                     u_stat, p_val = np.nan, 1.0
@@ -690,11 +738,128 @@ def test_stim_firing(ephys_data, bs, opsins=None, post_window_ms=(1.0, 31.0),
 
     results_df = pd.DataFrame(records)
 
+    # ---- Spearman dose-response helpers ----
+    def _spearman_one_sided(powers, rates):
+        """Spearman ρ(power, rate), one-sided p-value testing ρ > 0."""
+        if len(powers) < 4:
+            return np.nan, np.nan
+        rho, p_two = spearmanr(powers, rates)
+        p_one = float(p_two / 2) if rho > 0 else float(1.0 - p_two / 2)
+        return float(rho), p_one
+
+    def _fisher_z_test(rho1, n1, rho2, n2):
+        """Two-sided Fisher z-test comparing two Spearman correlations."""
+        if np.isnan(rho1) or np.isnan(rho2) or n1 < 4 or n2 < 4:
+            return np.nan, np.nan
+        z1 = np.arctanh(np.clip(rho1, -0.9999, 0.9999))
+        z2 = np.arctanh(np.clip(rho2, -0.9999, 0.9999))
+        se = np.sqrt(1.0 / (n1 - 3) + 1.0 / (n2 - 3))
+        z_diff = (z1 - z2) / se
+        p_two = float(2.0 * _norm.sf(abs(z_diff)))
+        return float(z_diff), p_two
+
+    # ---- per-unit summary ----
+    def _mwu(a, b, alternative='two-sided'):
+        if len(a) >= 2 and len(b) >= 2:
+            try:
+                res = mannwhitneyu(a, b, alternative=alternative)
+                return float(res.statistic), float(res.pvalue)
+            except ValueError:
+                pass
+        return np.nan, np.nan
+
+    summary_records = []
+    for unit in units:
+        ch  = raw_rates.get((unit, 'chrimson'), {})
+        c2  = raw_rates.get((unit, 'chr2'),     {})
+        ch_post = ch.get('post',     np.array([]))
+        ch_bl   = ch.get('baseline', np.array([]))
+        c2_post = c2.get('post',     np.array([]))
+        c2_bl   = c2.get('baseline', np.array([]))
+
+        # Existing MWU comparisons
+        u_ch_bl, p_ch_bl = _mwu(ch_post, ch_bl,  alternative='greater')
+        u_c2_bl, p_c2_bl = _mwu(c2_post, c2_bl,  alternative='greater')
+        u_ch_c2, p_ch_c2 = _mwu(ch_post, c2_post, alternative='two-sided')
+        u_bl_bl, p_bl_bl = _mwu(ch_bl,   c2_bl,   alternative='two-sided')
+
+        opsin_vs_bl_sig = (
+            (not np.isnan(p_ch_bl) and p_ch_bl < alpha) or
+            (not np.isnan(p_c2_bl) and p_c2_bl < alpha)
+        )
+        tagged = bool(opsin_vs_bl_sig and (not np.isnan(p_ch_c2) and p_ch_c2 < alpha))
+
+        # Spearman dose-response: combine stim trials (power > 0) with
+        # per-trial mean baseline (power = 0) to anchor the curve.
+        ch_powers = np.concatenate([np.zeros(len(ch.get('trial_baseline_means', []))),
+                                    ch.get('trial_powers', np.array([]))])
+        ch_rates  = np.concatenate([ch.get('trial_baseline_means', np.array([])),
+                                    ch.get('trial_post_rates',     np.array([]))])
+        c2_powers = np.concatenate([np.zeros(len(c2.get('trial_baseline_means', []))),
+                                    c2.get('trial_powers', np.array([]))])
+        c2_rates  = np.concatenate([c2.get('trial_baseline_means', np.array([])),
+                                    c2.get('trial_post_rates',     np.array([]))])
+
+        rho_ch, p_rho_ch = _spearman_one_sided(ch_powers, ch_rates)
+        rho_c2, p_rho_c2 = _spearman_one_sided(c2_powers, c2_rates)
+
+        delta_rho = (float(rho_ch) - float(rho_c2)
+                     if not (np.isnan(rho_ch) or np.isnan(rho_c2)) else np.nan)
+        fisher_z, fisher_pval = _fisher_z_test(rho_ch, len(ch_powers),
+                                                rho_c2, len(c2_powers))
+
+        # Hierarchical cell-type label
+        ch_sig     = (not np.isnan(p_rho_ch)  and p_rho_ch  < alpha)
+        c2_sig     = (not np.isnan(p_rho_c2)  and p_rho_c2  < alpha)
+        fisher_sig = (not np.isnan(fisher_pval) and fisher_pval < alpha)
+
+        if ch_sig and not c2_sig:
+            cell_type = 'iSPN'
+        elif c2_sig and not ch_sig:
+            cell_type = 'dSPN'
+        elif ch_sig and c2_sig:
+            if fisher_sig:
+                cell_type = 'iSPN' if (not np.isnan(delta_rho) and delta_rho > 0) else 'dSPN'
+            else:
+                cell_type = 'muSPN'
+        else:
+            cell_type = np.nan
+
+        dominant_opsin = None
+        if fisher_sig and not np.isnan(delta_rho):
+            dominant_opsin = 'chrimson' if delta_rho > 0 else 'chr2'
+
+        summary_records.append({
+            'unit': unit,
+            # MWU comparisons (kept for backwards compatibility)
+            'mwu_stat_chrimson_vs_baseline':               u_ch_bl,
+            'mwu_pval_chrimson_vs_baseline':               p_ch_bl,
+            'mwu_stat_chr2_vs_baseline':                   u_c2_bl,
+            'mwu_pval_chr2_vs_baseline':                   p_c2_bl,
+            'mwu_stat_chrimson_vs_chr2':                   u_ch_c2,
+            'mwu_pval_chrimson_vs_chr2':                   p_ch_c2,
+            'mwu_stat_chrimson_baseline_vs_chr2_baseline': u_bl_bl,
+            'mwu_pval_chrimson_baseline_vs_chr2_baseline': p_bl_bl,
+            'tagged': tagged,
+            # Spearman dose-response
+            'spearman_rho_chrimson':  rho_ch,
+            'spearman_pval_chrimson': p_rho_ch,
+            'spearman_rho_chr2':      rho_c2,
+            'spearman_pval_chr2':     p_rho_c2,
+            'delta_rho':              delta_rho,
+            'fisher_z_stat':          fisher_z,
+            'fisher_z_pval':          fisher_pval,
+            'dominant_opsin':         dominant_opsin,
+            'cell_type':              cell_type,
+        })
+
+    summary_df = pd.DataFrame(summary_records)
+
     # ---- bar-graph per unit ----
     if len(results_df) > 0:
         _plot_stim_firing_bars(results_df, plot_folder, alpha)
 
-    return results_df
+    return results_df, summary_df
 
 
 def _plot_stim_firing_bars(results_df, plot_folder, alpha=0.05):
@@ -751,7 +916,7 @@ def _plot_stim_firing_bars(results_df, plot_folder, alpha=0.05):
         else:
             plt.show()
 
-def plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=None, max_latency_ms=100):
+def plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=None, max_latency_ms=100, alpha=0.05):
     """
     Plot the distribution of time to first spike (TTFS) relative to optogenetic stimulus onset
     for each neuron and opsin. The TTFS is calculated as the latency between the stimulus
@@ -767,12 +932,33 @@ def plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=None, max_
         If provided, a summary PNG is saved to ``save_folder / ttfs_summary.png``.
     max_latency_ms : float
         Maximum latency for considering a spike (default 100 ms).
+    alpha : float
+        Significance threshold used for ``cell_type`` labelling (default 0.05).
 
     Returns
     -------
     df : pandas.DataFrame
-        DataFrame containing TTFS data with columns:
-        ``['unit', 'opsin', 'power', 'onset_s', 'ttfs_ms', 'responded']``
+        Per-trial TTFS data with columns:
+        ``['unit', 'opsin', 'power', 'onset_s', 'ttfs_ms', 'prestim_ttfs_ms', 'responded']``.
+        Trials where no spike occurred within ``max_latency_ms`` are censored
+        (``responded=False``, ``ttfs_ms=max_latency_ms``).
+    cox_df : pandas.DataFrame
+        Per-unit Cox Proportional Hazards results with columns:
+        ``['unit', 'n_obs', 'n_events', 'concordance_index',
+           'coef_power_chrimson', 'hr_power_chrimson', 'p_power_chrimson',
+           'coef_power_chr2',     'hr_power_chr2',     'p_power_chr2',
+           'lrt_stat', 'lrt_pval',
+           'delta_coef', 'dominant_opsin', 'cell_type']``.
+        ``hr`` is the hazard ratio exp(coef); higher means spikes earlier
+        per unit increase in power.  Two nested models are compared:
+        M1 (separate slopes per opsin) vs M0 (shared slope); the LRT
+        p-value tests whether the two dose-response slopes are
+        significantly different.  ``delta_coef`` = coef_chrimson −
+        coef_chr2 (positive = chrimson steeper).  ``dominant_opsin`` is
+        set only when LRT is significant.  ``cell_type`` labels neurons
+        hierarchically: 'iSPN' (chrimson-specific), 'dSPN' (chr2-
+        specific), 'muSPN' (both significant but indistinguishable), or
+        NaN (not tagged).  All numeric columns are NaN if fitting fails.
     ttfs_folder : Path
         Path to the folder containing saved unit figures.
     """
@@ -825,14 +1011,15 @@ def plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=None, max_
                         ttfs_ms = float(max_latency_ms)
                         responded = False
                         
-                    # Calculate null TTFS from the 100ms preceding the event onset
-                    rel_null = spike_times - (onset - 0.1)
-                    mask_null = (rel_null > 0) & (rel_null <= 0.1)
-                    if np.any(mask_null):
-                        null_latency_s = np.min(rel_null[mask_null])
-                        null_ttfs_ms = float(null_latency_s * 1000.0)
+                    # Pre-stimulus control: first spike in the 100 ms window before onset.
+                    # Trials with no spike are right-censored at max_latency_ms.
+                    rel_null = spike_times - (onset - float(max_latency_ms) / 1000.0)
+                    mask_null = (rel_null > 0) & (rel_null <= float(max_latency_ms) / 1000.0)
+                    prestim_responded = bool(np.any(mask_null))
+                    if prestim_responded:
+                        prestim_ttfs_ms = float(np.min(rel_null[mask_null]) * 1000.0)
                     else:
-                        null_ttfs_ms = 100.0
+                        prestim_ttfs_ms = float(max_latency_ms)
 
                     records.append({
                         'unit': unit,
@@ -840,22 +1027,155 @@ def plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=None, max_
                         'power': power,
                         'onset_s': float(onset),
                         'ttfs_ms': ttfs_ms,
-                        'null_ttfs_ms': null_ttfs_ms,
-                        'responded': responded
+                        'responded': responded,
+                        'prestim_ttfs_ms': prestim_ttfs_ms,
+                        'prestim_responded': prestim_responded,
                     })
 
     df = pd.DataFrame(records)
 
-    # prepare to plot per-unit TTFS histograms
-    opsins = ['chrimson', 'chr2']
+    # ---- Cox Proportional Hazards per unit ----
+    # Two nested models compared by likelihood ratio test (LRT):
+    #
+    #   M1 (full):  separate power slopes per opsin
+    #               power_chrimson = power × I(chrimson)
+    #               power_chr2     = power × I(chr2)
+    #               — orthogonal predictors, always identifiable
+    #
+    #   M0 (null):  single shared power slope
+    #               power (same coefficient for both opsins)
+    #
+    # LRT stat = 2 × (loglik_M1 − loglik_M0) ~ χ²(df=1)
+    # Tests whether the two dose-response slopes are significantly different.
+    from lifelines import CoxPHFitter, KaplanMeierFitter
+    from scipy.stats import chi2 as _chi2
+
+    cox_records = []
     units = sorted(df['unit'].dropna().unique())
+    for unit in units:
+        unit_df = df[df['unit'] == unit].copy()
+        unit_df['opsin_encoded'] = (unit_df['opsin'] == 'chrimson').astype(int)
+        unit_df['event'] = unit_df['responded'].astype(int)
+        unit_df['power_chrimson'] = unit_df['power'] * unit_df['opsin_encoded']
+        unit_df['power_chr2']     = unit_df['power'] * (1 - unit_df['opsin_encoded'])
+        stim_df = unit_df[['ttfs_ms', 'event', 'power',
+                            'power_chrimson', 'power_chr2']].dropna()
+
+        # Pre-stim rows at power=0 — both per-opsin slopes are 0 here,
+        # so they anchor the baseline without affecting slope estimation.
+        prestim_df = pd.DataFrame({
+            'ttfs_ms':        unit_df['prestim_ttfs_ms'].values,
+            'event':          unit_df['prestim_responded'].astype(int).values,
+            'power':          0.0,
+            'power_chrimson': 0.0,
+            'power_chr2':     0.0,
+        }).dropna()
+        fit_df = pd.concat([stim_df, prestim_df], ignore_index=True)
+
+        n_obs    = len(fit_df)
+        n_events = int(fit_df['event'].sum())
+
+        coef_ch = hr_ch = p_ch = np.nan
+        coef_c2 = hr_c2 = p_c2 = np.nan
+        lrt_stat = lrt_pval = np.nan
+        ci = np.nan
+
+        if n_events >= 2:
+            try:
+                # Full model — separate slopes
+                cph_full = CoxPHFitter(penalizer=0.1)
+                cph_full.fit(fit_df[['ttfs_ms', 'event', 'power_chrimson', 'power_chr2']],
+                             duration_col='ttfs_ms', event_col='event')
+                s = cph_full.summary
+                if 'power_chrimson' in s.index:
+                    coef_ch = float(s.loc['power_chrimson', 'coef'])
+                    hr_ch   = float(s.loc['power_chrimson', 'exp(coef)'])
+                    p_ch    = float(s.loc['power_chrimson', 'p'])
+                if 'power_chr2' in s.index:
+                    coef_c2 = float(s.loc['power_chr2', 'coef'])
+                    hr_c2   = float(s.loc['power_chr2', 'exp(coef)'])
+                    p_c2    = float(s.loc['power_chr2', 'p'])
+                ci      = float(cph_full.concordance_index_)
+                ll_full = float(cph_full.log_likelihood_)
+
+                # Null model — shared slope
+                cph_null = CoxPHFitter(penalizer=0.1)
+                cph_null.fit(fit_df[['ttfs_ms', 'event', 'power']],
+                             duration_col='ttfs_ms', event_col='event')
+                ll_null  = float(cph_null.log_likelihood_)
+
+                lrt_stat = float(max(0.0, 2.0 * (ll_full - ll_null)))
+                lrt_pval = float(_chi2.sf(lrt_stat, df=1))
+            except Exception:
+                pass
+
+        cox_records.append({
+            'unit': unit,
+            'n_obs': n_obs,
+            'n_events': n_events,
+            'concordance_index': ci,
+            'coef_power_chrimson': coef_ch,
+            'hr_power_chrimson':   hr_ch,
+            'p_power_chrimson':    p_ch,
+            'coef_power_chr2':     coef_c2,
+            'hr_power_chr2':       hr_c2,
+            'p_power_chr2':        p_c2,
+            'lrt_stat':            lrt_stat,
+            'lrt_pval':            lrt_pval,
+        })
+
+    cox_df = pd.DataFrame(cox_records)
+
+    # ---- derived summary columns ----
+    cox_df['delta_coef'] = cox_df['coef_power_chrimson'] - cox_df['coef_power_chr2']
+
+    ch_sig  = cox_df['p_power_chrimson'] < alpha
+    c2_sig  = cox_df['p_power_chr2']     < alpha
+    lrt_sig = cox_df['lrt_pval']         < alpha
+
+    # dominant_opsin: which opsin has the steeper slope, but only reported
+    # when the LRT confirms the difference is significant.
+    cox_df['dominant_opsin'] = np.where(
+        lrt_sig,
+        np.where(cox_df['delta_coef'] > 0, 'chrimson', 'chr2'),
+        None,
+    )
+
+    # cell_type: hierarchical labelling
+    #   1. one opsin significant, other not → label by the significant one
+    #   2. both significant + LRT significant → label by stronger slope
+    #   3. both significant + LRT not significant → 'muSPN' (ambiguous)
+    #   4. neither significant → NaN (not tagged)
+    def _cell_type(row):
+        ch  = row['p_power_chrimson'] < alpha
+        c2  = row['p_power_chr2']     < alpha
+        lrt = row['lrt_pval']         < alpha
+        if ch and not c2:
+            return 'iSPN'
+        if c2 and not ch:
+            return 'dSPN'
+        if ch and c2:
+            if lrt:
+                return 'iSPN' if row['delta_coef'] > 0 else 'dSPN'
+            return 'muSPN'
+        return np.nan
+
+    cox_df['cell_type'] = cox_df.apply(_cell_type, axis=1)
+
+    # ---- per-unit TTFS plots (Kaplan-Meier cumulative incidence) ----
+    # Censored trials (no spike) contribute to the risk set but do not pull
+    # the curve to 1, giving an unbiased estimate of spiking probability.
+    opsins = ['chrimson', 'chr2']
     all_powers = sorted(df['power'].dropna().unique())
     n_opsins = len(opsins)
     n_powers = max(len(all_powers), 1)
 
+    cox_lookup = cox_df.set_index('unit') if len(cox_df) > 0 else None
+
     for unit in units:
-        fig, axs = plt.subplots(nrows=n_powers, ncols=n_opsins, figsize=(5 * n_opsins, 3 * n_powers), sharex=True, sharey=True)
-        # Ensure axs is a 2D array
+        fig, axs = plt.subplots(nrows=n_powers, ncols=n_opsins,
+                                figsize=(5 * n_opsins, 3 * n_powers),
+                                sharex=True, sharey=True)
         if n_powers == 1 and n_opsins == 1:
             axs = np.array([[axs]])
         elif n_powers == 1:
@@ -864,43 +1184,72 @@ def plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=None, max_
             axs = axs[:, np.newaxis]
 
         unit_df = df[df['unit'] == unit]
-        
-        # Null distribution: pooled first spike times in the 100ms prior across all opsins/powers
-        null_latencies = unit_df['null_ttfs_ms'].dropna().values
-            
-        bins = np.arange(0, max_latency_ms + 5, 5)
+
+        # Pre-stim KM fit (pooled across all opsins/powers for this unit)
+        prestim_dur = unit_df['prestim_ttfs_ms'].values.astype(float)
+        prestim_evt = unit_df['prestim_responded'].values.astype(bool)
+        kmf_null = None
+        if len(prestim_dur) > 0:
+            kmf_null = KaplanMeierFitter()
+            kmf_null.fit(prestim_dur, event_observed=prestim_evt)
 
         for col, op in enumerate(opsins):
             op_df = unit_df[unit_df['opsin'] == op]
-            
-            for row, power in enumerate(all_powers):
-                ax = axs[row, col]
+            for row_idx, power in enumerate(all_powers):
+                ax = axs[row_idx, col]
                 power_df = op_df[op_df['power'] == power]
-                latencies = power_df['ttfs_ms'].dropna().values
-                
-                pow_label = f"{int(power) if power == int(power) else power}"
-                
-                if len(null_latencies) > 0:
-                    ax.hist(null_latencies, bins=bins, alpha=0.8, color='gray', label='Null Dist', density=True, cumulative=True, histtype='step', linewidth=2)
-                
-                if len(latencies) > 0:
-                    ax.hist(latencies, bins=bins, alpha=0.8, color='C0', label=f'{op}', density=True, cumulative=True, histtype='step', linewidth=2)
-                    ax.set_title(f'{op} @ {pow_label} \u00b5W')
+                dur = power_df['ttfs_ms'].values.astype(float)
+                evt = power_df['responded'].values.astype(bool)
+                pow_label = str(int(power)) if power == int(power) else str(power)
+
+                if kmf_null is not None:
+                    t_null = kmf_null.timeline
+                    ci_null = 1.0 - kmf_null.survival_function_.values.flatten()
+                    ax.step(t_null, ci_null, color='gray', linewidth=2,
+                            label='Pre-stim', alpha=0.8, where='post')
+
+                if len(dur) > 0:
+                    kmf_op = KaplanMeierFitter()
+                    kmf_op.fit(dur, event_observed=evt)
+                    t_op = kmf_op.timeline
+                    ci_op = 1.0 - kmf_op.survival_function_.values.flatten()
+                    ax.step(t_op, ci_op, color='C0', linewidth=2,
+                            label=op, alpha=0.8, where='post')
+                    ax.set_title(f'{op} @ {pow_label} \u00b5W', fontsize=8)
                 else:
-                    ax.set_title(f'{op} @ {pow_label} \u00b5W (No Data)')
-                
-                if row == n_powers - 1:
+                    ax.set_title(f'{op} @ {pow_label} \u00b5W (No Data)', fontsize=8)
+
+                ax.set_xlim(0, max_latency_ms)
+                ax.set_ylim(0, 1)
+                if row_idx == n_powers - 1:
                     ax.set_xlabel('Time to first spike (ms)')
                 if col == 0:
-                    ax.set_ylabel('Cumulative Probability')
-                
-                if len(null_latencies) > 0 or len(latencies) > 0:
+                    ax.set_ylabel('Cumulative incidence')
+                if kmf_null is not None or len(dur) > 0:
                     ax.legend(fontsize=8)
-                
-        fig.suptitle(f'Unit {unit} - Time to First Spike Distribution')
+
+        # annotate suptitle with Cox results for this unit
+        cox_note = ''
+        if cox_lookup is not None and unit in cox_lookup.index:
+            crow = cox_lookup.loc[unit]
+            p_ch   = float(crow['p_power_chrimson'])
+            hr_ch  = float(crow['hr_power_chrimson'])
+            p_c2   = float(crow['p_power_chr2'])
+            hr_c2  = float(crow['hr_power_chr2'])
+            p_lrt  = float(crow['lrt_pval'])
+            parts = []
+            if not np.isnan(p_ch):
+                parts.append(f'chrimson: HR={hr_ch:.2f}, p={p_ch:.3g}')
+            if not np.isnan(p_c2):
+                parts.append(f'chr2: HR={hr_c2:.2f}, p={p_c2:.3g}')
+            if not np.isnan(p_lrt):
+                parts.append(f'LRT p={p_lrt:.3g}')
+            if parts:
+                cox_note = '\nCox PH \u2014 ' + '  |  '.join(parts)
+
+        fig.suptitle(f'Unit {unit} \u2014 TTFS Cumulative Incidence{cox_note}', fontsize=9)
         plt.tight_layout()
-        figpath = ttfs_folder / f'Unit_{unit}_ttfs.png'
-        plt.savefig(figpath)
+        plt.savefig(ttfs_folder / f'Unit_{unit}_ttfs.png')
         plt.close(fig)
 
-    return df, ttfs_folder
+    return df, cox_df, ttfs_folder

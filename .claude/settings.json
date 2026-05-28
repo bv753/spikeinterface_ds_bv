@@ -6,7 +6,9 @@
       "PowerShell(Get-ChildItem \"$env:USERPROFILE\\\\AppData\\\\Local\\\\Programs\" -Directory -ErrorAction SilentlyContinue | Select-Object Name | Sort-Object Name)",
       "PowerShell(Get-ChildItem \"$env:USERPROFILE\" -Directory | Select-Object Name | Sort-Object Name)",
       "Read(//c/Users/assad/miniconda3/envs/**)",
-      "Bash(mkdir -p \"c:/Users/assad/Documents/codevault/spikeinterface_pipeline/.vscode\")"
+      "Bash(mkdir -p \"c:/Users/assad/Documents/codevault/spikeinterface_pipeline/.vscode\")",
+      "Bash(\"C:/Users/assad/miniconda3/envs/si_env/python.exe\" plot_opto_waveforms.py)",
+      "Bash(C:/Users/assad/miniconda3/envs/si_env/python.exe -c ' *)"
     ],
     "additionalDirectories": [
       "c:\\Users\\assad\\Documents\\codevault\\spikeinterface_pipeline"

@@ -3,6 +3,7 @@ import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib
+import matplotlib.gridspec as gridspec
 matplotlib.use('Qt5Agg')
 import re
 #joblib
@@ -158,9 +159,9 @@ def _draw_opto_psth_on_axes(timestamps, opsin, power_trefs, power_off_events,
         Pre/post window in seconds.
     """
     if len(power_trefs) == 0:
-        ax_psth.set_title(opsin)
+        ax_psth.set_title(opsin, fontsize=15)
         ax_psth.text(0.5, 0.5, 'no events', transform=ax_psth.transAxes,
-                     ha='center', va='center', fontsize=9, color='grey')
+                     ha='center', va='center', fontsize=14, color='grey')
         return
 
     cmap = plt.cm.viridis
@@ -190,7 +191,7 @@ def _draw_opto_psth_on_axes(timestamps, opsin, power_trefs, power_off_events,
 
     total_trials = sum(trial_counts)
     if total_trials == 0:
-        ax_psth.set_title(opsin)
+        ax_psth.set_title(opsin, fontsize=15)
         return
 
     # ---- PSTH ----
@@ -211,9 +212,10 @@ def _draw_opto_psth_on_axes(timestamps, opsin, power_trefs, power_off_events,
             ax_psth.plot(ref.index, grand_avg, linewidth=2, color='black', label='mean')
         else:
             ax_psth.plot(grand_avg, linewidth=2, color='black', label='mean')
-    ax_psth.set_ylabel("Rate (spikes/s)")
-    ax_psth.legend(fontsize=6, loc='upper right', ncol=min(n_powers + 1, 5))
-    ax_psth.set_title(opsin)
+    ax_psth.set_ylabel("Rate (spikes/s)", fontsize=15)
+    ax_psth.legend(fontsize=9, loc='lower left', bbox_to_anchor=(1.01, 0), borderaxespad=0,
+                   ncol=1)
+    ax_psth.set_title(opsin, fontsize=15)
 
     # ---- Raster ----
     trial_offset = 0
@@ -234,8 +236,8 @@ def _draw_opto_psth_on_axes(timestamps, opsin, power_trefs, power_off_events,
         cum += trial_counts[i]
         ax_raster.axhline(cum, color='grey', linewidth=0.5, linestyle='-')
 
-    ax_raster.set_ylabel("Trial #")
-    ax_raster.set_xlabel("Time from stimulus onset (s)")
+    ax_raster.set_ylabel("Trial #", fontsize=15)
+    ax_raster.set_xlabel("Time from stimulus onset (s)", fontsize=15)
 
     # vertical lines
     for ax in (ax_psth, ax_raster):
@@ -247,10 +249,16 @@ def _draw_opto_psth_on_axes(timestamps, opsin, power_trefs, power_off_events,
                            linewidth=0.6, alpha=0.7)
 
 
+_OPSIN_WF_COLORS = {'chr2': 'steelblue', 'chrimson': 'darkorange'}
+
+
 def plot_opto_psth_single_unit(timestamps, opsin_data, unitID,
+                               waveform_data=None, unit_label=None,
                                save_folder=None, minmax=(-0.5, 0.5)):
     """
     Plot chrimson and chr2 PSTH + raster side-by-side for one unit.
+    When waveform_data is provided a third row of waveform plots is added
+    below the raster (peak channel, spikes during opto-on intervals only).
 
     Parameters
     ----------
@@ -258,10 +266,11 @@ def plot_opto_psth_single_unit(timestamps, opsin_data, unitID,
         Spike timestamps for the unit.
     opsin_data : dict
         ``{opsin_name: (power_trefs, power_off_events)}`` for each opsin.
-        *power_trefs* is a list of ``(power_int, tref)`` sorted by power;
-        *power_off_events* is a matching list of ``(power_int, off_ts | None)``.
     unitID : int or str
         Unit identifier.
+    waveform_data : dict or None
+        ``{opsin_name: ndarray (n_spikes, n_samples) or None}``
+        Pre-selected waveforms (peak channel) per opsin.
     save_folder : Path or None
     minmax : tuple
     """
@@ -270,13 +279,27 @@ def plot_opto_psth_single_unit(timestamps, opsin_data, unitID,
     if n_opsins == 0:
         return
 
-    fig, axs = plt.subplots(2, n_opsins, figsize=(8 * n_opsins, 7),
-                            sharex=True,
-                            sharey='row',
-                            gridspec_kw={'height_ratios': [1, 2.5]})
-    # ensure axs is always 2-D even when n_opsins == 1
-    if n_opsins == 1:
-        axs = axs[:, np.newaxis]
+    has_wf = waveform_data is not None
+
+    if has_wf:
+        fig = plt.figure(figsize=(8 * n_opsins, 10), layout='constrained')
+        gs = gridspec.GridSpec(3, n_opsins, height_ratios=[1, 2.5, 2], figure=fig)
+        axs = np.empty((3, n_opsins), dtype=object)
+        for col in range(n_opsins):
+            axs[0, col] = fig.add_subplot(gs[0, col])
+            axs[1, col] = fig.add_subplot(gs[1, col], sharex=axs[0, col])
+            axs[2, col] = fig.add_subplot(gs[2, col])
+        for col in range(1, n_opsins):
+            axs[0, col].sharey(axs[0, 0])
+            axs[1, col].sharey(axs[1, 0])
+            axs[2, col].sharey(axs[2, 0])
+            axs[2, col].sharex(axs[2, 0])
+    else:
+        fig, axs = plt.subplots(2, n_opsins, figsize=(8 * n_opsins, 7),
+                                sharex=True, sharey='row',
+                                gridspec_kw={'height_ratios': [1, 2.5]})
+        if n_opsins == 1:
+            axs = axs[:, np.newaxis]
 
     for col, opsin in enumerate(opsins):
         power_trefs, power_off_events = opsin_data[opsin]
@@ -284,8 +307,28 @@ def plot_opto_psth_single_unit(timestamps, opsin_data, unitID,
                                 ax_psth=axs[0, col], ax_raster=axs[1, col],
                                 minmax=minmax)
 
-    fig.suptitle(f"Unit {unitID}  –  opto PSTH (all powers)", fontsize=12)
-    fig.tight_layout()
+    if has_wf:
+        for col, opsin in enumerate(opsins):
+            ax = axs[2, col]
+            wfs = waveform_data.get(opsin)
+            color = _OPSIN_WF_COLORS.get(opsin, 'grey')
+            if wfs is not None and len(wfs) > 0:
+                for wf in wfs:
+                    ax.plot(wf, color=color, alpha=0.2, linewidth=0.5)
+                ax.plot(wfs.mean(axis=0), color='black', linewidth=2,
+                        label=f'mean (n={len(wfs)})')
+                ax.legend(fontsize=12, loc='upper left', bbox_to_anchor=(1.01, 1), borderaxespad=0)
+            else:
+                ax.text(0.5, 0.5, 'no spikes in interval',
+                        transform=ax.transAxes, ha='center', va='center', color='grey')
+            ax.set_xlabel('Sample', fontsize=15)
+            if col == 0:
+                ax.set_ylabel('Amplitude (µV)', fontsize=15)
+
+    label_str = f"  [{unit_label}]" if unit_label is not None else ""
+    fig.suptitle(f"Unit {unitID}{label_str}  -  opto PSTH (all powers)", fontsize=18)
+    if not has_wf:
+        fig.tight_layout()
 
     if save_folder is not None:
         fig.savefig(save_folder / f"Unit_{unitID}_opto_all_powers_psth.png", dpi=150)
@@ -322,7 +365,66 @@ def _collect_opsin_events(bs_metadata, bs, opsin):
     return power_trefs, power_off_events
 
 
-def plot_all_opto_psth(ephys_data, bs, pynapple_folder, minmax=(-0.5, 0.5)):
+def _get_opto_on_off_times(bs, opsin):
+    """Return (on_times, off_times) arrays for all opto pulses of the given opsin."""
+    metadata = bs.metadata
+    events = metadata[metadata['event'].str.contains(opsin, case=False, na=False)]
+    events = events[~events['event'].str.contains('trace', na=False)]
+    on_rows = events[events['event'].str.contains('_on', na=False)]
+    off_rows = events[events['event'].str.contains('_off', na=False)]
+
+    def _collect(rows):
+        times = []
+        for idx in rows.index:
+            ts = bs[idx]
+            times.extend(ts.t.tolist() if hasattr(ts, 't') else ts.index.tolist())
+        return np.array(sorted(times))
+
+    return _collect(on_rows), _collect(off_rows)
+
+
+def _precompute_opto_waveforms(analyzer, bs, opsins):
+    """
+    For each unit, extract peak-channel waveforms that fall during opto-on
+    intervals per opsin.
+
+    Returns dict: {unit_id: {opsin: ndarray (n_spikes, n_samples) or None}}
+    """
+    waveforms_ext = analyzer.get_extension('waveforms')
+    rsp_indices = analyzer.get_extension('random_spikes').get_data()
+    spk_vec = analyzer.sorting.to_spike_vector()
+    fs = analyzer.sampling_frequency
+    unit_ids = analyzer.unit_ids
+
+    opsin_intervals = {opsin: _get_opto_on_off_times(bs, opsin) for opsin in opsins}
+
+    all_wf_data = {}
+    for unit_id in unit_ids:
+        waveforms = waveforms_ext.get_waveforms_one_unit(unit_id)  # (n_rsp, n_samples, n_ch)
+        peak_ch = int(np.argmax(np.max(np.abs(waveforms.mean(axis=0)), axis=0)))
+
+        unit_idx = list(unit_ids).index(unit_id)
+        in_rsp = spk_vec['unit_index'][rsp_indices] == unit_idx
+        times_s = spk_vec['sample_index'][rsp_indices[in_rsp]] / fs
+
+        unit_wf = {}
+        for opsin in opsins:
+            on_times, off_times = opsin_intervals[opsin]
+            if len(on_times) == 0:
+                unit_wf[opsin] = None
+                continue
+            mask = np.zeros(len(times_s), dtype=bool)
+            for on, off in zip(on_times, off_times):
+                mask |= (times_s >= on) & (times_s <= off)
+            selected = waveforms[mask, :, peak_ch]
+            unit_wf[opsin] = selected if len(selected) > 0 else None
+
+        all_wf_data[unit_id] = unit_wf
+
+    return all_wf_data
+
+
+def plot_all_opto_psth(ephys_data, bs, pynapple_folder, minmax=(-0.5, 0.5), analyzer=None):
     """
     For each unit, plot chrimson and chr2 PSTH + raster side-by-side in one
     figure, with raster rows ordered by ascending power.
@@ -356,11 +458,28 @@ def plot_all_opto_psth(ephys_data, bs, pynapple_folder, minmax=(-0.5, 0.5)):
         print("No chrimson or chr2 events found in bs.metadata; skipping opto PSTH.")
         return
 
+    all_wf_data = None
+    if analyzer is not None:
+        print("Pre-computing opto waveforms...")
+        all_wf_data = _precompute_opto_waveforms(analyzer, bs, list(opsin_data.keys()))
+
+    metadata = ephys_data.metadata
+
+    ks_col = next((c for c in ('KSLabel', 'ks_label') if c in metadata.columns), None)
+
+    def _unit_label(neuron):
+        parts = []
+        if ks_col is not None:
+            parts.append(f"KS:{metadata.loc[neuron, ks_col]}")
+        return '  '.join(parts) if parts else None
+
     Parallel(n_jobs=-1, verbose=5)(
         delayed(plot_opto_psth_single_unit)(
             timestamps=ephys_data[neuron],
             opsin_data=opsin_data,
             unitID=neuron,
+            waveform_data=all_wf_data.get(neuron) if all_wf_data is not None else None,
+            unit_label=_unit_label(neuron),
             save_folder=save_folder,
             minmax=minmax
         ) for neuron in neurons_idx

@@ -131,6 +131,12 @@ def run_pipeline(base_folder, nidaq_map=None, bad_chans=None, export_raw_summary
     bombcell_labels = sic.bombcell_label_units(analyzer_merged, thresholds=bombcell_default_thresholds,
                                               label_non_somatic=True, split_non_somatic_good_mua=True)
 
+
+
+    analyzer_merged.sorting.set_property(
+        'bombcell_label',
+        bombcell_labels.loc[analyzer_merged.unit_ids, 'bombcell_label'].values
+    )
     # keep all labels that are not 'noise'
     keep_unit_ids = bombcell_labels[bombcell_labels['bombcell_label'] != 'noise'].index.tolist()
     analyzer_clean = analyzer_merged.select_units(keep_unit_ids)
@@ -203,15 +209,15 @@ def plot_time_to_first_spike(base_folder, overwrite=False, nidq_map_kwargs=None)
     ephys_data, bs, pynapple_folder = get_pynapple_data(base_folder, nidq_map_kwargs, overwrite)
     save_folder = pynapple_folder / "ttfs_plots"
     opsins = ['chrimson', 'chr2']
-    df, figpath = pot.plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=pynapple_folder)
-    return df, figpath
+    df, cox_df, figpath = pot.plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=pynapple_folder)
+    return df, cox_df, figpath
 
 
 def test_stim_firing(base_folder, overwrite_bs=False, nidq_map_kwargs=None, **kwargs):
     """Convenience wrapper: load pynapple data and run the stim-firing Mann-Whitney U test."""
     ephys_data, bs, pynapple_folder = get_pynapple_data(base_folder, nidq_map_kwargs, overwrite_bs)
-    results_df = pot.test_stim_firing(ephys_data, bs, save_folder=pynapple_folder, **kwargs)
-    return results_df
+    results_df, summary_df = pot.test_stim_firing(ephys_data, bs, save_folder=pynapple_folder, **kwargs)
+    return results_df, summary_df
 
 def test_time_to_first_spike():
     base_folder = Path(r"C:\Users\assad\Documents\recording_files\DS23\DS23_20260211")#modify the paths as needed
