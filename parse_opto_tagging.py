@@ -916,6 +916,163 @@ def _plot_stim_firing_bars(results_df, plot_folder, alpha=0.05):
         else:
             plt.show()
 
+def plot_stim_firing_bars(ephys_data, bs, save_folder=None, alpha=0.05,
+                          post_window_ms=(1.0, 31.0),
+                          baseline_duration_s=1.0, baseline_gap_ms=1.0,
+                          baseline_bin_ms=10.0):
+    """Per-unit bar chart: baseline vs per-power evoked firing rate.
+
+    One subplot per opsin, each 0.8 × 0.8 in.  Orange bars = chrimson,
+    blue bars = chr2 (shade varies by power level).  Grey bar = pooled
+    baseline.  Error bars are 95 % CI of the mean.  All text 8 pt.
+    Saves SVG + PNG under save_folder/stim_firing_plots_v2/.
+    """
+    import re
+    import plot_size_utils as psu
+
+    opsins = ['chrimson', 'chr2']
+    _CMAPS  = {'chrimson': plt.cm.Oranges, 'chr2': plt.cm.Blues}
+    _LABELS = {'chrimson': 'amber', 'chr2': 'blue'}
+
+    post_start_s   = post_window_ms[0] / 1000.0
+    post_end_s     = post_window_ms[1] / 1000.0
+    post_bin_s     = post_end_s - post_start_s
+    baseline_bin_s = baseline_bin_ms  / 1000.0
+    baseline_gap_s = baseline_gap_ms  / 1000.0
+
+    def _extr_power(s):
+        m = re.search(r"(\d+)$", str(s))
+        return int(m.group(1)) if m else None
+
+    def _ci95(arr):
+        arr = np.asarray(arr, dtype=float)
+        if len(arr) < 2:
+            return 0.0
+        return 1.96 * arr.std() / np.sqrt(len(arr))
+
+    bs_metadata = bs.metadata
+
+    # collect per-opsin onset times grouped by power
+    opsin_info = {}
+    for opsin in opsins:
+        on_mask = bs_metadata['event'].str.contains(f'{opsin}_on', na=False)
+        on_df = bs_metadata[on_mask].copy()
+        if on_df.empty:
+            continue
+        on_df['power'] = on_df['event'].apply(_extr_power)
+        on_df = on_df.dropna(subset=['power'])
+
+        power_groups = {}
+        all_onsets, all_powers = [], []
+        for idx in on_df.index:
+            pw = int(on_df.loc[idx, 'power'])
+            ts_obj = bs[idx]
+            onsets = ts_obj.t.tolist() if hasattr(ts_obj, 't') else ts_obj.index.tolist()
+            power_groups.setdefault(pw, []).extend(onsets)
+            all_onsets.extend(onsets)
+            all_powers.extend([float(pw)] * len(onsets))
+
+        if not all_onsets:
+            continue
+        sort_idx = np.argsort(all_onsets)
+        opsin_info[opsin] = {
+            'all_onsets':   np.array(all_onsets)[sort_idx],
+            'power_groups': {k: np.array(v) for k, v in power_groups.items()},
+        }
+
+    if not opsin_info:
+        print("No opsin events found; skipping plot_stim_firing_bars.")
+        return
+
+    if save_folder is not None:
+        out_folder = Path(save_folder) / 'stim_firing_plots_v2'
+        out_folder.mkdir(parents=True, exist_ok=True)
+    else:
+        out_folder = None
+
+    units = list(ephys_data.keys())
+    present_opsins = [op for op in opsins if op in opsin_info]
+    n_cols = len(present_opsins)
+
+    for unit in units:
+        spike_times = np.asarray(ephys_data[unit].index)
+
+        fig, axs = plt.subplots(1, n_cols, squeeze=False)
+
+        for ci, opsin in enumerate(present_opsins):
+            info          = opsin_info[opsin]
+            all_onsets    = info['all_onsets']
+            power_groups  = info['power_groups']
+            sorted_powers = sorted(power_groups)
+            n_pw          = max(len(sorted_powers) - 1, 1)
+            cmap          = _CMAPS[opsin]
+            ax            = axs[0, ci]
+
+            # pooled baseline for this opsin
+            n_bins = int(baseline_duration_s / baseline_bin_s)
+            bl_rates = []
+            for onset in all_onsets:
+                bl_end   = onset - baseline_gap_s
+                bl_start = bl_end - baseline_duration_s
+                for b in range(n_bins):
+                    lo = bl_start + b * baseline_bin_s
+                    hi = lo + baseline_bin_s
+                    bl_rates.append(
+                        int(np.sum((spike_times >= lo) & (spike_times < hi)))
+                        / baseline_bin_s
+                    )
+            bl_rates = np.array(bl_rates)
+            bl_mean  = float(bl_rates.mean()) if len(bl_rates) else 0.0
+            bl_ci    = _ci95(bl_rates)
+
+            xs      = [0]
+            means   = [bl_mean]
+            cis     = [bl_ci]
+            colors  = ['grey']
+            xlabels = ['BL']
+
+            for pi, pw in enumerate(sorted_powers):
+                onsets_pw  = power_groups[pw]
+                post_rates = np.array([
+                    int(np.sum((spike_times >= (on + post_start_s)) &
+                               (spike_times <  (on + post_end_s))))
+                    / post_bin_s
+                    for on in onsets_pw
+                ], dtype=float)
+
+                xs.append(pi + 1)
+                means.append(float(post_rates.mean()) if len(post_rates) else 0.0)
+                cis.append(_ci95(post_rates))
+                colors.append(cmap(0.45 + 0.55 * pi / n_pw))
+                xlabels.append(f'{pw} µW')
+
+            xs    = np.array(xs)
+            means = np.array(means)
+            cis   = np.array(cis)
+
+            ax.bar(xs, means, color=colors, width=0.7)
+            ax.errorbar(xs, means, yerr=cis,
+                        fmt='none', color='black', linewidth=0.8,
+                        capsize=2, capthick=0.8)
+
+            ax.set_xticks(xs)
+            ax.set_xticklabels(xlabels, fontsize=8, rotation=45, ha='right')
+            ax.set_ylabel('Firing rate (Hz)', fontsize=8)
+            ax.tick_params(labelsize=8)
+            ax.set_title(_LABELS[opsin], fontsize=8)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+
+        psu.adjust_figure_for_panel_size_hetero(fig, panel_width=0.8, panel_height=0.8)
+
+        if out_folder is not None:
+            fig.savefig(out_folder / f'Unit_{unit}_stim_firing_bar.svg', bbox_inches='tight')
+            fig.savefig(out_folder / f'Unit_{unit}_stim_firing_bar.png', dpi=150, bbox_inches='tight')
+            plt.close(fig)
+        else:
+            plt.show()
+
+
 def plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=None, max_latency_ms=100, alpha=0.05):
     """
     Plot the distribution of time to first spike (TTFS) relative to optogenetic stimulus onset
@@ -1253,3 +1410,121 @@ def plot_time_to_first_spike_distribution(ephys_data, bs, save_folder=None, max_
         plt.close(fig)
 
     return df, cox_df, ttfs_folder
+
+
+def plot_ttfs_cdf_single(ephys_data, bs, save_folder=None, max_latency_ms=100):
+    """Single-panel CDF variant of plot_time_to_first_spike_distribution.
+
+    All per-power CDF curves are drawn on one 0.8 × 0.8 in axes per unit.
+    Chrimson curves are shades of orange, chr2 curves are shades of blue
+    (darker = higher power). The pooled pre-stimulus shuffle is a single
+    grey step curve. No legend. All text 8 pt.
+    Saves SVG + PNG under save_folder/opto_tagging/ttfs_single/.
+    """
+    import re
+    import pandas as pd
+    from lifelines import KaplanMeierFitter
+    import plot_size_utils as psu
+
+    if save_folder is None:
+        save_folder = Path.cwd()
+    else:
+        save_folder = Path(save_folder)
+    out_folder = save_folder / 'opto_tagging' / 'ttfs_single'
+    out_folder.mkdir(parents=True, exist_ok=True)
+
+    bs_metadata = bs.metadata
+    records = []
+
+    def _extract_power(s):
+        m = re.search(r"(\d+)$", str(s))
+        return int(m.group(1)) if m else np.nan
+
+    for opsin in ['chrimson', 'chr2']:
+        mask = bs_metadata['event'].str.contains(f'{opsin}_on', na=False)
+        events_idx = bs_metadata[mask].copy()
+        if events_idx.empty:
+            continue
+        events_idx['power'] = events_idx['event'].apply(_extract_power)
+        max_lat_s = float(max_latency_ms) / 1000.0
+
+        for idx, row in events_idx.iterrows():
+            ts_obj = bs[idx]
+            onsets = ts_obj.t if hasattr(ts_obj, 't') else ts_obj.index
+            power = row['power']
+            for onset in onsets:
+                for unit in ephys_data.keys():
+                    spike_times = ephys_data[unit].index
+                    rel = spike_times - onset
+                    mask_post = (rel > 0) & (rel <= max_lat_s)
+                    responded = bool(np.any(mask_post))
+                    ttfs_ms = float(np.min(rel[mask_post]) * 1000.0) if responded else float(max_latency_ms)
+
+                    rel_null = spike_times - (onset - max_lat_s)
+                    mask_null = (rel_null > 0) & (rel_null <= max_lat_s)
+                    prestim_responded = bool(np.any(mask_null))
+                    prestim_ttfs_ms = (float(np.min(rel_null[mask_null]) * 1000.0)
+                                       if prestim_responded else float(max_latency_ms))
+
+                    records.append({
+                        'unit': unit, 'opsin': opsin, 'power': power,
+                        'ttfs_ms': ttfs_ms, 'responded': responded,
+                        'prestim_ttfs_ms': prestim_ttfs_ms,
+                        'prestim_responded': prestim_responded,
+                    })
+
+    df = pd.DataFrame(records)
+    if df.empty:
+        print("No TTFS data found; skipping.")
+        return
+
+    _CMAPS  = {'chrimson': plt.cm.Oranges, 'chr2': plt.cm.Blues}
+
+    for unit in sorted(df['unit'].dropna().unique()):
+        unit_df = df[df['unit'] == unit]
+
+        fig, ax = plt.subplots(1, 1)
+
+        # pre-stim shuffle — pooled across all opsins/powers, one grey curve
+        prestim_dur = unit_df['prestim_ttfs_ms'].values.astype(float)
+        prestim_evt = unit_df['prestim_responded'].values.astype(bool)
+        if len(prestim_dur) > 0:
+            kmf_null = KaplanMeierFitter()
+            kmf_null.fit(prestim_dur, event_observed=prestim_evt)
+            ci_null = 1.0 - kmf_null.survival_function_.values.flatten()
+            ax.step(kmf_null.timeline, ci_null,
+                    color='grey', linewidth=1.0, alpha=0.8, where='post')
+
+        # per-opsin × per-power curves
+        for opsin in ['chrimson', 'chr2']:
+            op_df = unit_df[unit_df['opsin'] == opsin]
+            if op_df.empty:
+                continue
+            cmap = _CMAPS[opsin]
+            op_powers = sorted(op_df['power'].dropna().unique())
+            n_op = max(len(op_powers) - 1, 1)
+            for pi, power in enumerate(op_powers):
+                dur = op_df.loc[op_df['power'] == power, 'ttfs_ms'].values.astype(float)
+                evt = op_df.loc[op_df['power'] == power, 'responded'].values.astype(bool)
+                if len(dur) == 0:
+                    continue
+                color = cmap(0.45 + 0.55 * pi / n_op)
+                kmf = KaplanMeierFitter()
+                kmf.fit(dur, event_observed=evt)
+                ci_op = 1.0 - kmf.survival_function_.values.flatten()
+                ax.step(kmf.timeline, ci_op,
+                        color=color, linewidth=1.0, alpha=0.9, where='post')
+
+        ax.set_xlim(0, max_latency_ms)
+        ax.set_ylim(0, 1)
+        ax.set_xlabel('Time to first spike (ms)', fontsize=8)
+        ax.set_ylabel('Cumulative incidence', fontsize=8)
+        ax.tick_params(labelsize=8)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        psu.adjust_figure_for_panel_size_auto(fig, panel_width=0.8, panel_height=0.8)
+
+        fig.savefig(out_folder / f'Unit_{unit}_ttfs_single.svg', bbox_inches='tight')
+        fig.savefig(out_folder / f'Unit_{unit}_ttfs_single.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)

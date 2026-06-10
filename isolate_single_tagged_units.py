@@ -3,6 +3,8 @@ import pynapple as nap
 from pathlib import Path
 import parse_opto_tagging as pot
 
+#base_folder = Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_050526")
+#base_folder = Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_20260506")
 base_folder = Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_20260511")
 pynapple_folder = base_folder / "pynapple"
 ephys_file = pynapple_folder / "spikes.npz"
@@ -26,10 +28,21 @@ ephys_metadata = ephys_metadata.join(
     how='left'
 )
 
-# -- final_classif: ks_label good/empty AND both methods agree on iSPN or dSPN --
+# -- load manually curated good units if present --
+manual_good_path = pynapple_folder / "manual_good_units.txt"
+if manual_good_path.exists():
+    import re
+    manual_good_ids = [int(x) for x in re.findall(r'\d+', manual_good_path.read_text())]
+else:
+    manual_good_ids = []
+manual_ok = ephys_metadata.index.isin(manual_good_ids)
+print(f"manual_good_units.txt: loaded {len(manual_good_ids)} IDs: {manual_good_ids}")
+print(f"  matched {manual_ok.sum()} units in ephys_metadata (index dtype: {ephys_metadata.index.dtype})")
+
+# -- final_classif: ks_label good/empty OR manually curated, AND both methods agree on iSPN or dSPN --
 ks_col = next((c for c in ('KSLabel', 'ks_label') if c in ephys_metadata.columns), None)
 if ks_col is not None:
-    ks_ok = ephys_metadata[ks_col].isin(['good']) | ephys_metadata[ks_col].isna() | (ephys_metadata[ks_col] == '')
+    ks_ok = ephys_metadata[ks_col].isin(['good']) | ephys_metadata[ks_col].isna() | (ephys_metadata[ks_col] == '') | manual_ok
 else:
     ks_ok = pd.Series(True, index=ephys_metadata.index)
 
@@ -54,12 +67,36 @@ poss_fn = ephys_metadata[both_agree & both_spn & ~ks_ok].copy()
 both_labeled = ephys_metadata['ttfs_classif'].notna() & ephys_metadata['firing_classif'].notna()
 dis_df = ephys_metadata[ks_ok & both_labeled & ~both_agree].copy()
 
-# disagreeing good-quality units are labelled iSPN and folded into best_tagged
-ephys_metadata.loc[dis_df.index, 'final_classif'] = 'iSPN'
+# disagreeing good-quality units: use whichever classification is not 'muSPN',
+# preferring ttfs_classif; fall back to 'iSPN' only if both are 'muSPN'.
+for uid in dis_df.index:
+    ttfs = ephys_metadata.loc[uid, 'ttfs_classif']
+    firing = ephys_metadata.loc[uid, 'firing_classif']
+    if pd.notna(ttfs) and ttfs != 'muSPN':
+        ephys_metadata.loc[uid, 'final_classif'] = ttfs
+    elif pd.notna(firing) and firing != 'muSPN':
+        ephys_metadata.loc[uid, 'final_classif'] = firing
+    else:
+        ephys_metadata.loc[uid, 'final_classif'] = 'muSPN'
+
+# manually labeled units that still lack a final_classif: assign from whichever
+# method gave an SPN type (ttfs first, then firing), falling back to 'iSPN'
+unclassified_manual = manual_ok & ephys_metadata['final_classif'].isna()
+for uid in ephys_metadata.index[unclassified_manual]:
+    ttfs = ephys_metadata.loc[uid, 'ttfs_classif']
+    firing = ephys_metadata.loc[uid, 'firing_classif']
+    if pd.notna(ttfs) and ttfs in spn_types:
+        ephys_metadata.loc[uid, 'final_classif'] = ttfs
+    elif pd.notna(firing) and firing in spn_types:
+        ephys_metadata.loc[uid, 'final_classif'] = firing
+    else:
+        ephys_metadata.loc[uid, 'final_classif'] = 'muSPN'
+
 best_tagged = ephys_metadata[ephys_metadata['final_classif'].notna()].copy()
 
-# all good-quality units regardless of classification
-singU_metadata = ephys_metadata[ephys_metadata[ks_col] == 'good'].copy() if ks_col is not None else ephys_metadata.copy()
+# all good-quality units regardless of classification (KS label or manual override)
+ks_good = (ephys_metadata[ks_col] == 'good') if ks_col is not None else pd.Series(True, index=ephys_metadata.index)
+singU_metadata = ephys_metadata[ks_good | manual_ok].copy()
 
 # subset TsGroup to good units, attach enriched metadata, and save
 sing_units = ephys[singU_metadata.index.tolist()]

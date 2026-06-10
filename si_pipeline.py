@@ -71,8 +71,9 @@ def run_pipeline(base_folder, nidaq_map=None, bad_chans=None, export_raw_summary
         }
     }
 
-    preprocessed_rec = si.apply_preprocessing_pipeline(raw_rec, my_protocol['preprocessing'])
-    preprocessed_rec.save(folder=base_folder / 'preprocess', format='binary', n_jobs=23, progress_bar=True, overwrite=True)
+
+    preprocessed_rec = si.apply_preprocessing_pipeline(raw_rec, my_protocol['preprocessing'], n_jobs=-1, progress_bar=True)
+    preprocessed_rec.save(folder=base_folder / 'preprocess', format='binary', n_jobs=-1, progress_bar=True, overwrite=True)
     #preprocessed_rec = si.load(base_folder / 'preprocess')
     sorting = si.run_sorter(recording=preprocessed_rec, **my_protocol['sorting'])
 
@@ -130,7 +131,6 @@ def run_pipeline(base_folder, nidaq_map=None, bad_chans=None, export_raw_summary
     bombcell_default_thresholds = sic.bombcell_get_default_thresholds()
     bombcell_labels = sic.bombcell_label_units(analyzer_merged, thresholds=bombcell_default_thresholds,
                                               label_non_somatic=True, split_non_somatic_good_mua=True)
-
 
 
     analyzer_merged.sorting.set_property(

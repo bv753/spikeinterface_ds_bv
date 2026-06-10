@@ -2,7 +2,7 @@ import parse_nidq as pni
 import pandas as pd
 
 def get_stimulation_times_df(base_folder):
-    bs = pni.get_binary_signals(base_folder, overwrite=False)
+    bs = pni.get_binary_signals(base_folder, overwrite=True)
     bs_md = bs.metadata
     # get all rows of bs_md where column 'event' contains 'chrimson_on' or 'chr2_on'
     on_events = bs_md[bs_md['event'].str.contains('chrimson_on|chr2_on')]

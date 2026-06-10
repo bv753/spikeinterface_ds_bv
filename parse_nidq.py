@@ -139,6 +139,8 @@ def parse_tones_analog(analog_events, solenoid_ts_list, nidq_t_aligned, idx={'to
     return parse_tones(tone_onsets, tone_offsets, solenoid_onsets, time_support)
 
 def parse_tones(tone_onsets, tone_offsets, solenoid_onsets, time_support, verbose=False):
+    tone_onsets.sort()
+    tone_offsets.sort()
     inter_onset_intervals = np.diff(tone_onsets)
     inter_offset_intervals = np.diff(tone_offsets)
 
@@ -226,18 +228,33 @@ def parse_tones(tone_onsets, tone_offsets, solenoid_onsets, time_support, verbos
         if len(reward_in_between) + len(timeout_in_between) + len(error_in_between) > 1:
             raise ValueError(f"Multiple outcome tones found between cue at index {i} and next cue.")
 
-    n_outcomes = len(reward_tone_onsets) + len(timeout_tone_onsets) + len(error_tone_onsets)
+    outcomes = np.sort(np.concatenate((reward_tone_onsets, timeout_tone_onsets, error_tone_onsets)))
+    n_outcomes = len(outcomes)
     n_cues = len(cue_tone_onsets)
-    if n_outcomes != n_cues:
-        outcomes = np.concatenate((reward_tone_onsets, timeout_tone_onsets, error_tone_onsets))
-        outcomes.sort()
 
-        for i in range(min(n_outcomes, n_cues)):
-            #if the cue tone onset is greater than the outcome tone onset, print a warning
-            if cue_tone_onsets[i] > outcomes[i]:
-                raise ValueError(f"Cue tone onset at index {i} occurs after outcome tone onset.")
+    # one trailing unmatched cue is OK (task cut off mid-trial); unmatched outcomes are not
+    if n_cues < n_outcomes:
+        raise ValueError(
+            f"More outcomes ({n_outcomes}) than cues ({n_cues}): "
+            f"{n_outcomes - n_cues} outcome(s) have no preceding cue."
+        )
+    if n_cues > n_outcomes + 1:
+        print(f"Warning: {n_cues - n_outcomes} unmatched cue(s) at end of session (expected at most 1).")
 
-        print("Warning: number of outcomes does not match number of cue onsets")
+    for i in range(n_outcomes):
+        if cue_tone_onsets[i] >= outcomes[i]:
+            raise ValueError(
+                f"Cue {i} (t={cue_tone_onsets[i]:.4f}) does not precede its outcome (t={outcomes[i]:.4f})."
+            )
+        if i < n_outcomes - 1 and outcomes[i] >= cue_tone_onsets[i + 1]:
+            raise ValueError(
+                f"Outcome {i} (t={outcomes[i]:.4f}) does not precede cue {i+1} (t={cue_tone_onsets[i+1]:.4f}): "
+                f"sequences are not properly interleaved."
+            )
+
+    if n_cues != n_outcomes:
+        print(f"Warning: {n_cues} cues, {n_outcomes} outcomes "
+              f"(1 trailing unmatched cue assumed — task cut off mid-trial).")
         if verbose:
             print('reward_tone_onsets', reward_tone_onsets)
             print('number of reward tones', len(reward_tone_onsets))
@@ -517,20 +534,24 @@ def parse_trials(start_tone_ts, outcome_tone_ts, lick_ts, require_first_licks=Tr
     trial_starts = []
     trial_ends = []
     first_licks = []
-    cues = []
+    start_cues = []
+    outcome_tones = []
     for t in outcome_tone_ts.t:
-        #get timestamps in start_tone_ts.t that are less than t
+        #get timestamps of start_tone_ts.t that are less than outcome_tone.t[t]
         possible_starts = start_tone_ts.t[start_tone_ts.t < t]
+        #ensure possible_starts are sorted
+        possible_starts.sort()
         if len(possible_starts) > 0:
-            trial_start = possible_starts[-1]
-            trial_starts.append(trial_start-1.5)
-            cues.append(trial_start)
-            trial_ends.append(t+10)
+            trial_start = possible_starts[-1] #get the latest
+            trial_starts.append(trial_start)
+            start_cues.append(trial_start)
+            trial_ends.append(t+7.0)
+            outcome_tones.append(t)
 
             assert trial_start < t, "Trial start {} is not less than trial end {}".format(trial_start, t)
             trial_licks = lick_ts.t[(lick_ts.t >= trial_start) & (lick_ts.t <= t)]
             if len(trial_licks) > 0:
-                first_lick = trial_licks[0]
+                first_lick = trial_licks[-1]
             else:
                 first_lick = np.nan
             first_licks.append(first_lick)
@@ -540,7 +561,7 @@ def parse_trials(start_tone_ts, outcome_tone_ts, lick_ts, require_first_licks=Tr
 
 
     #ensure that the lengths of trial_starts and trial_ends are the same
-    assert len(trial_starts) == len(trial_ends)
+    assert len(trial_starts) == len(trial_ends) == len(first_licks) == len(outcome_tones)
 
     # if any first licks are nan, raise an error
     if require_first_licks:
@@ -554,7 +575,8 @@ def parse_trials(start_tone_ts, outcome_tone_ts, lick_ts, require_first_licks=Tr
             #remove slice of trial_starts where nanidx
             trial_starts = np.delete(trial_starts, nanidx)
             trial_ends = np.delete(trial_ends, nanidx)
-            cues = np.delete(cues, nanidx)
+            start_cues = np.delete(start_cues, nanidx)
+            outcome_tones = np.delete(outcome_tones, nanidx)
 
         first_licks_ts = nap.Ts(np.array(first_licks), time_support=time_support)
     else:
@@ -562,11 +584,12 @@ def parse_trials(start_tone_ts, outcome_tone_ts, lick_ts, require_first_licks=Tr
 
     trial_starts = nap.Ts(np.array(trial_starts), time_support=time_support)
     trial_ends = nap.Ts(np.array(trial_ends), time_support=time_support)
-    cues_ts = nap.Ts(np.array(cues), time_support=time_support)
+    start_cues_ts = nap.Ts(np.array(start_cues), time_support=time_support)
+    outcome_tones_ts = nap.Ts(np.array(outcome_tones), time_support=time_support)
 
-    return trial_starts,trial_ends, cues_ts, first_licks_ts
+    return trial_starts, trial_ends, start_cues_ts, outcome_tones_ts, first_licks_ts
 
-def parse_lick_bouts(lick_ts, ili_thresh=0.5):
+def parse_lick_bouts(lick_ts, ili_thresh=0.3):
     #thresh from https://pmc.ncbi.nlm.nih.gov/articles/PMC6063358/
     time_support = lick_ts.time_support
     lick_times = lick_ts.t
@@ -991,9 +1014,16 @@ def get_binary_signals(base_folder=None, dinmap=None,ainmap=None, optoidx=None, 
     ITI_starts = nap.Ts(all_outcome_tone_ts.t[:-1] + 3.7)
     ITI_ends = nap.Ts(start_tone_ts.t[1:] - 1.5)
 
-    reward_trials_starts, reward_trials_ends, rewarded_cues_ts, rewarded_first_licks_ts = parse_trials(start_tone_ts, reward_tone_ts, lick_ts)
-    error_trials_starts, error_trials_ends, early_cues_ts, early_first_licks_ts = parse_trials(start_tone_ts, error_tone_ts, lick_ts)
-    timeout_trials_starts, timeout_trials_ends, timeout_cues_ts, _  = parse_trials(start_tone_ts, timeout_tone_ts, lick_ts, require_first_licks=False)
+    reward_trials_starts, reward_trials_ends, rewarded_cues_ts, reward_tones_ts, rewarded_first_licks_ts = parse_trials(start_tone_ts, reward_tone_ts, lick_ts)
+    error_trials_starts, error_trials_ends, early_cues_ts, early_tones_ts, early_first_licks_ts = parse_trials(start_tone_ts, error_tone_ts, lick_ts)
+    timeout_trials_starts, timeout_trials_ends, timeout_cues_ts, timeout_tones_ts, _  = parse_trials(start_tone_ts, timeout_tone_ts, lick_ts, require_first_licks=False)
+
+    #redefine start_tone_ts to be the composite of reward_trials_starts, error_trials_starts, and timeout_trials_starts
+    start_cues = np.concatenate((early_cues_ts.t, rewarded_cues_ts.t, timeout_cues_ts.t))
+    outcome_tones = np.concatenate((early_tones_ts.t, reward_tones_ts.t, timeout_tones_ts.t))
+    start_cue_ts = nap.Ts(np.sort(start_cues), time_support=time_support)
+    outcome_tones_ts = nap.Ts(np.sort(outcome_tones), time_support=time_support)
+
 
     lick_bout_starts_ts, lick_bout_ends_ts = parse_lick_bouts(lick_ts)
 
@@ -1002,22 +1032,30 @@ def get_binary_signals(base_folder=None, dinmap=None,ainmap=None, optoidx=None, 
         2: 'early_first_licks',
         3: 'rewarded_cues',
         4: 'early_cues',
-        5: 'start_cues',
-        6: 'outcome_cues',
-        7: 'ITI_starts',
-        8: 'ITI_ends',
-        9: 'lick_bout_starts',
-        10: 'lick_bout_ends'}, orient='index', columns=['event'])
+        5: 'timeout_cues',
+        6: 'start_cues',
+        7: 'reward_tones',
+        8: 'early_tones',
+        9: 'timeout_tones',
+        10: 'outcome_tones',
+        11: 'ITI_starts',
+        12: 'ITI_ends',
+        13: 'lick_bout_starts',
+        14: 'lick_bout_ends'}, orient='index', columns=['event'])
     first_licks_ts = nap.TsGroup({1: rewarded_first_licks_ts,
                                   2: early_first_licks_ts,
                                   3: rewarded_cues_ts,
                                   4: early_cues_ts,
-                                  5: start_tone_ts,
-                                  6: all_outcome_tone_ts,
-                                  7: ITI_starts,
-                                  8: ITI_ends,
-                                  9: lick_bout_starts_ts,
-                                  10: lick_bout_ends_ts
+                                  5: timeout_cues_ts,
+                                  6: start_cue_ts,
+                                  7: reward_tones_ts,
+                                  8: early_tones_ts,
+                                  9: timeout_tones_ts,
+                                  10: outcome_tones_ts,
+                                  11: ITI_starts,
+                                  12: ITI_ends,
+                                  13: lick_bout_starts_ts,
+                                  14: lick_bout_ends_ts
                                   },
                                  metadata=first_licks_metadata, time_support=time_support)
 

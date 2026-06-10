@@ -4,7 +4,9 @@
       "Bash(conda env *)",
       "Bash(Select-String \"si_env\")",
       "PowerShell(conda env list 2>&1)",
-      "PowerShell(Get-ChildItem \"$env:USERPROFILE\\\\miniconda3\\\\envs\", \"$env:USERPROFILE\\\\anaconda3\\\\envs\", \"C:\\\\ProgramData\\\\miniconda3\\\\envs\", \"C:\\\\ProgramData\\\\anaconda3\\\\envs\" -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq \"si_env\" } | Select-Object FullName)"
+      "PowerShell(Get-ChildItem \"$env:USERPROFILE\\\\miniconda3\\\\envs\", \"$env:USERPROFILE\\\\anaconda3\\\\envs\", \"C:\\\\ProgramData\\\\miniconda3\\\\envs\", \"C:\\\\ProgramData\\\\anaconda3\\\\envs\" -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq \"si_env\" } | Select-Object FullName)",
+      "Read(//mnt/c/Users/assad/Documents/codevault/**)",
+      "Bash(python3 -)"
     ]
   }
 }

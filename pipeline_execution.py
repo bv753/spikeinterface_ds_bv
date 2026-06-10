@@ -1,7 +1,8 @@
 import si_pipeline as sip
 from pathlib import Path
 
-pathlist = [Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_20260511")]
+pathlist = [Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_20260506")]
+#[Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_20260511")]
 
 base_folder = pathlist[0]
 
