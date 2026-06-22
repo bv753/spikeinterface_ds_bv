@@ -7,14 +7,14 @@ matplotlib.use('Qt5Agg')
 import pandas as pd
 import numpy as np
 import spikeinterface.curation as sic
-import metrics_curation as mc
-import get_stimulation_frames as gsf
+from postprocessing import metrics_curation as mc
+from preprocessing import get_stimulation_frames as gsf
 import shutil
 from spikeinterface.widgets import plot_sorting_summary
-import parse_nidq as pni
+from preprocessing import parse_nidq as pni
 import pynapple as nap
-import parse_opto_tagging as pot
-import plot_psth as pp
+from postprocessing import parse_opto_tagging as pot
+from analysis import plot_psth as pp
 
 def run_pipeline(base_folder, nidaq_map=None, bad_chans=None, export_raw_summary=False):
     #base folder needs to be a Path object

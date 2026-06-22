@@ -2,7 +2,7 @@ import spikeinterface as si
 import pynapple as nap
 from pathlib import Path
 import matplotlib.pyplot as plt
-import pres_plot_utils as pu
+from analysis import pres_plot_utils as pu
 
 subj_folder = Path(r"C:\Users\assad\Documents\recording_files\DS2")
 save_folder = subj_folder / "compendium"

@@ -2,7 +2,7 @@ import spikeinterface as si
 import pynapple as nap
 from pathlib import Path
 import matplotlib.pyplot as plt
-import pres_plot_utils as pu
+from analysis import pres_plot_utils as pu
 
 #base_folder = Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_050526")
 #base_folder = Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_20260506")

@@ -1,4 +1,4 @@
-import si_pipeline as sip
+from scripts import si_pipeline as sip
 from pathlib import Path
 
 pathlist = [Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_20260506")]

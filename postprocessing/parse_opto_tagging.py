@@ -1,6 +1,6 @@
 import pynapple as nap
 from pathlib import Path
-import parse_nidq as pni
+from preprocessing import parse_nidq as pni
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Qt5Agg')

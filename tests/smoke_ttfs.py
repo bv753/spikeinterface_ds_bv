@@ -45,7 +45,7 @@ ephys_data = {
 }
 
 # Now import the function under test
-from parse_opto_tagging import plot_time_to_first_spike_distribution
+from postprocessing.parse_opto_tagging import plot_time_to_first_spike_distribution
 
 out_folder = Path('.') / 'tests' / 'smoke_output'
 out_folder.mkdir(parents=True, exist_ok=True)

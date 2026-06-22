@@ -1,6 +1,6 @@
 import spikeinterface as si
-import si_pipeline as sip
-import plot_psth as pp
+from scripts import si_pipeline as sip
+from analysis import plot_psth as pp
 from pathlib import Path
 
 

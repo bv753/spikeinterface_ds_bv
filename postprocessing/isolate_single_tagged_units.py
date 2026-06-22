@@ -1,7 +1,7 @@
 import spikeinterface as si
 import pynapple as nap
 from pathlib import Path
-import parse_opto_tagging as pot
+from postprocessing import parse_opto_tagging as pot
 
 #base_folder = Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_050526")
 #base_folder = Path(r"C:\Users\assad\Documents\recording_files\DS2\DS2_20260506")

@@ -1,4 +1,4 @@
-import parse_nidq as pni
+from preprocessing import parse_nidq as pni
 import pandas as pd
 
 def get_stimulation_times_df(base_folder):

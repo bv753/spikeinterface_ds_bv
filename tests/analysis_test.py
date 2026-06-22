@@ -1,9 +1,8 @@
 import pynapple as nap
 from pathlib import Path
-import parse_nidq as pni
-import plot_psth as pp
-import parse_opto_tagging as pot
-import get_ramp_modulation as grm
+from preprocessing import parse_nidq as pni
+from analysis import plot_psth as pp
+from postprocessing import parse_opto_tagging as pot
 
 def run_analysis(base_folder, dinmap=None, ainmap=None, optoidx=None, overwrite=False):
         pynapple_folder = base_folder / "pynapple"

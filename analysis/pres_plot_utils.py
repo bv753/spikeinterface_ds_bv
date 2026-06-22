@@ -5,7 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.ticker as mticker
-import plot_size_utils as psu
+from utils import plot_size_utils as psu
 
 def _make_dark_cmap(name, darken=0.95):
     colors = plt.get_cmap(name)(np.linspace(0, 1, 256))

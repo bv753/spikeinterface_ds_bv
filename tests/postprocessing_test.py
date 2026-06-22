@@ -5,7 +5,7 @@ import spikeinterface.core as sc
 from pathlib import Path
 matplotlib.use('Qt5Agg')
 from spikeinterface.curation import remove_duplicated_spikes
-import curation_test as ct
+from tests import curation_test as ct
 
 #base_folder = Path(r"C:\Users\assad\Documents\analysis_files\DS13\DS13_20250824")
 #spikeglx_folder = Path(r"C:\Users\assad\Documents\analysis_files\DS13\DS13_20250824\DS13_20250824_g0")
